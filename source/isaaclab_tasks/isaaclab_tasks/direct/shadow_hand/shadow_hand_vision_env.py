@@ -38,6 +38,8 @@ class ShadowHandVisionEnvCfg(ShadowHandEnvCfg):
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/Camera",
         offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.35, 1.0), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"),
+        # Enable desired data types: at least one of ["rgb", "depth", "semantic_segmentation"] must be enabled
+        # Can use combinations like ["depth"], ["rgb", "depth"], ["depth", "semantic_segmentation"] etc
         data_types=["rgb", "depth", "semantic_segmentation"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 20.0)
@@ -102,12 +104,22 @@ class ShadowHandVisionEnv(InHandManipulationEnv):
 
         object_pose = torch.cat([self.object_pos, self.gt_keypoints.view(-1, 24)], dim=-1)
 
+        # Get available image data from camera
+        camera_output = self._tiled_camera.data.output
+        rgb_img = camera_output.get("rgb", None)
+        depth_img = camera_output.get("depth", None)
+        segmentation_img = camera_output.get("semantic_segmentation", None)
+        
+        # If segmentation is available, take only the first 3 channels
+        if segmentation_img is not None:
+            segmentation_img = segmentation_img[..., :3]
+
         # train CNN to regress on keypoint positions
         pose_loss, embeddings = self.feature_extractor.step(
-            self._tiled_camera.data.output["rgb"],
-            self._tiled_camera.data.output["depth"],
-            self._tiled_camera.data.output["semantic_segmentation"][..., :3],
-            object_pose,
+            rgb_img=rgb_img,
+            depth_img=depth_img,
+            segmentation_img=segmentation_img,
+            gt_pose=object_pose,
         )
 
         self.embeddings = embeddings.clone().detach()
