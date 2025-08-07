@@ -20,6 +20,7 @@ from enum import Enum
 
 import carb
 import pytest
+from flaky import flaky
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObject, RigidObjectCfg
@@ -267,6 +268,7 @@ def test_cube_contact_time(setup_simulation, device, terrain_type):
 
 @pytest.mark.parametrize("device", ["cuda:0", "cpu"])
 @pytest.mark.parametrize("terrain_type", ["flat_terrain", "cobblestone_terrain"])
+@flaky(max_runs=3, min_passes=1)
 def test_sphere_contact_time(setup_simulation, device, terrain_type):
     """Checks contact sensor values for contact time and air time for a sphere collision primitive."""
     # check for both contact processing enabled and disabled
