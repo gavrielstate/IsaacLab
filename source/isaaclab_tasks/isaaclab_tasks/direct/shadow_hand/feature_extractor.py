@@ -43,6 +43,7 @@ class FeatureExtractorNetwork(nn.Module):
             nn.Linear(128, 27),
         )
 
+        # ImageNet normalization statistics for RGB images
         self.data_transforms = torchvision.transforms.Compose([
             torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
@@ -107,6 +108,10 @@ class FeatureExtractor:
         # Feature extractor model - will be initialized with correct input channels
         self.feature_extractor = None  # Will be set in step() method
         self.input_channels = None
+        
+        # Pre-allocated buffer for inference to avoid repeated allocations
+        self.inference_buffer = None
+        self.buffer_shape = None
 
         self.step_count = 0
         self.log_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "logs")
@@ -195,6 +200,10 @@ class FeatureExtractor:
             self.feature_extractor = FeatureExtractorNetwork(input_channels)
             self.feature_extractor.to(self.device)
             
+            # Clear inference buffer when model architecture changes
+            self.inference_buffer = None
+            self.buffer_shape = None
+            
             # Try to load checkpoint if available and compatible
             if self.cfg.load_checkpoint and self.checkpoint_path is not None:
                 try:
@@ -207,6 +216,8 @@ class FeatureExtractor:
                             self.feature_extractor.load_state_dict(checkpoint_state)
                         else:
                             print(f"[WARNING]: Checkpoint has {checkpoint_input_channels} input channels but current model has {input_channels}. Skipping checkpoint loading.")
+                            print(f"[WARNING]: This usually means the training and play configurations have different camera data_types.")
+                            print(f"[WARNING]: To fix this, ensure the play configuration matches the training configuration.")
                     else:
                         print(f"[WARNING]: Checkpoint format not recognized. Skipping checkpoint loading.")
                 except Exception as e:
@@ -217,6 +228,16 @@ class FeatureExtractor:
                 self.feature_extractor.train()
             else:
                 self.feature_extractor.eval()
+
+    def _ensure_inference_buffer(self, shape: tuple[int, int, int, int]):
+        """Ensure the inference buffer is allocated with the correct shape.
+        
+        Args:
+            shape: Expected shape (batch_size, height, width, channels)
+        """
+        if self.inference_buffer is None or self.buffer_shape != shape:
+            self.buffer_shape = shape
+            self.inference_buffer = torch.empty(shape, device=self.device, dtype=torch.float32)
 
     def step(
         self, rgb_img: torch.Tensor | None = None, depth_img: torch.Tensor | None = None, 
@@ -252,6 +273,13 @@ class FeatureExtractor:
             img_parts.append(segmentation_img)
             
         img_input = torch.cat(img_parts, dim=-1)
+        
+        # Use buffer to ensure clean tensor state and avoid inference tensor issues
+        # Ensure buffer is allocated with correct shape
+        self._ensure_inference_buffer(img_input.shape)
+        # Copy data into pre-allocated buffer to ensure clean state
+        self.inference_buffer.copy_(img_input)
+        img_input = self.inference_buffer
 
         if self.cfg.train:
             with torch.enable_grad():
@@ -274,5 +302,9 @@ class FeatureExtractor:
 
                     return pose_loss, predicted_pose
         else:
+            # Check if model is properly initialized
+            if self.feature_extractor is None:
+                raise RuntimeError("Feature extractor model is not initialized. This should not happen.")
+            
             predicted_pose = self.feature_extractor(img_input)
             return None, predicted_pose
