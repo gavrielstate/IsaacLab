@@ -122,7 +122,8 @@ ensure_cuda_torch() {
     fi
 
     local index="${base_index}/cu${cuda_ver}"
-    local want_torch="${torch_ver}+cu${cuda_ver}"
+    local want_torch_cuda="${torch_ver}+cu${cuda_ver}"
+    local want_torch_cpu="${torch_ver}"
 
     # check current torch version (may be empty)
     local cur=""
@@ -136,15 +137,24 @@ else:
 PY
 )"
 
-    # skip install if version is already satisfied
-    if [[ "$cur" == "$want_torch" ]]; then
+    # skip install if version is already satisfied (CUDA or CPU)
+    if [[ "$cur" == "$want_torch_cuda" ]] || [[ "$cur" == "$want_torch_cpu" ]]; then
         return 0
     fi
 
     # clean install torch
-    echo "[INFO] Installing torch==${torch_ver} and torchvision==${tv_ver} (cu${cuda_ver}) from ${index}..."
     ${pip_uninstall_command} torch torchvision torchaudio >/dev/null 2>&1 || true
-    ${pip_install_command} -U --index-url "${index}" "torch==${torch_ver}" "torchvision==${tv_ver}"
+
+    # try CUDA version first
+    echo "[INFO] Attempting to install torch==${torch_ver} and torchvision==${tv_ver} (cu${cuda_ver}) from ${index}..."
+    if ${pip_install_command} -U --index-url "${index}" "torch==${torch_ver}" "torchvision==${tv_ver}" 2>/dev/null; then
+        echo "[INFO] Successfully installed CUDA-enabled PyTorch."
+    else
+        # fall back to CPU-only version
+        echo "[WARNING] CUDA version installation failed. Falling back to CPU-only version..."
+        echo "[INFO] Installing torch==${torch_ver} and torchvision==${tv_ver} (CPU-only)..."
+        ${pip_install_command} -U "torch==${torch_ver}" "torchvision==${tv_ver}"
+    fi
 }
 
 # extract isaac sim path
