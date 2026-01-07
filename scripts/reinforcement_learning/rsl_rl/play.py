@@ -98,6 +98,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlBaseRun
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    
+    # Ensure agent device is set to CPU when CUDA is not available
+    # This is critical for loading CUDA-trained models on CPU-only systems
+    if not torch.cuda.is_available():
+        print("[INFO] CUDA not available. Forcing all devices to CPU for compatibility.")
+        agent_cfg.device = "cpu"
+        env_cfg.sim.device = "cpu"
+        # Also set torch's default device to CPU
+        torch.set_default_device("cpu")
+    
+    print(f"[INFO] Agent device: {agent_cfg.device}")
+    print(f"[INFO] Simulation device: {env_cfg.sim.device}")
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
@@ -138,12 +150,66 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlBaseRun
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
+    # Ensure the device is set correctly in the config dict
+    agent_dict = agent_cfg.to_dict()
+    agent_dict["device"] = agent_cfg.device  # Explicitly set device in dict
+    
+    print(f"[INFO] Creating runner with device: {agent_cfg.device}")
     if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        runner = OnPolicyRunner(env, agent_dict, log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        runner = DistillationRunner(env, agent_dict, log_dir=None, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    
+    # Verify runner's device is set correctly
+    print(f"[INFO] Runner device before patching: {runner.device}")
+    
+    # Aggressive fix for CPU-only systems: wrap the load method to force map_location
+    if not torch.cuda.is_available():
+        runner.device = "cpu"
+        print(f"[INFO] Force-set runner device to: {runner.device}")
+        
+        # Save the original load method
+        original_load = runner.load
+        
+        # Create a wrapper that forces CPU map_location
+        def load_with_cpu_map_location(path):
+            """Wrapper for runner.load() that forces CPU map_location."""
+            print(f"[INFO] Loading checkpoint with forced CPU map_location from: {path}")
+            # Directly call torch.load with CPU map_location, then apply to runner
+            checkpoint = torch.load(path, weights_only=False, map_location=torch.device('cpu'))
+            
+            # Manually apply the checkpoint to the runner's components
+            if hasattr(runner, 'alg') and runner.alg is not None:
+                # Handle different RSL-RL versions (actor_critic vs policy)
+                try:
+                    # version 2.3 onwards uses 'policy'
+                    policy_nn = runner.alg.policy
+                except AttributeError:
+                    # version 2.2 and below uses 'actor_critic'
+                    policy_nn = runner.alg.actor_critic
+                
+                # Load the model state
+                policy_nn.load_state_dict(checkpoint['model_state_dict'])
+                
+                # Load optimizer state if available
+                if 'optimizer_state_dict' in checkpoint and hasattr(runner.alg, 'optimizer'):
+                    runner.alg.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # Restore iteration counter
+            if 'iter' in checkpoint:
+                runner.current_learning_iteration = checkpoint['iter']
+            
+            print("[INFO] Checkpoint loaded successfully on CPU.")
+        
+        # Replace the load method with our wrapper
+        runner.load = load_with_cpu_map_location
+    
+    # Handle CPU-only systems loading CUDA-trained models
+    if not torch.cuda.is_available():
+        print("[INFO] Using custom CPU-compatible checkpoint loading.")
+    
     runner.load(resume_path)
 
     # obtain the trained policy for inference
