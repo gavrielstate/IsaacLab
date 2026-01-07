@@ -1397,7 +1397,7 @@ class Articulation(BaseArticulation):
         # Resolve indices into mask, convert from partial data to complete data, handles the conversion to warp.
         if isinstance(target, torch.Tensor):
             target = make_complete_data_from_torch_dual_index(
-                target, self.num_instances, self.num_joints, env_ids, joint_ids, dtype=wp.float32
+                target, self.num_instances, self.num_joints, env_ids, joint_ids, dtype=wp.float32, device=self.device
             )
         env_mask = make_masks_from_torch_ids(self.num_instances, env_ids, env_mask, device=self.device)
         joint_mask = make_masks_from_torch_ids(self.num_joints, joint_ids, joint_mask, device=self.device)

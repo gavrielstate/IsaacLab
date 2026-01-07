@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from typing import Any, ClassVar
 
 from isaaclab.managers import CommandManager, CurriculumManager, RewardManager, TerminationManager
+from isaaclab.sim.simulation_cfg import validate_device
 from isaaclab.ui.widgets import ManagerLiveVisualizer
 
 from .common import VecEnvStepReturn
@@ -72,6 +73,9 @@ class ManagerBasedRLEnv(ManagerBasedEnv, gym.Env):
         """
         # -- counter for curriculum
         self.common_step_counter = 0
+
+        # Ensure device is valid for the current system (fallback to CPU if CUDA unavailable)
+        cfg.sim.device = validate_device(cfg.sim.device)
 
         # initialize the episode length buffer BEFORE loading the managers to use it in mdp functions.
         self.episode_length_buf = torch.zeros(cfg.scene.num_envs, device=cfg.sim.device, dtype=torch.long)

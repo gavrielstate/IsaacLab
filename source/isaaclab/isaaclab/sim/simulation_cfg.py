@@ -11,11 +11,30 @@ configuring the environment instances, viewer settings, and simulation parameter
 
 from typing import Literal
 
+import torch
+
 from isaaclab.utils import configclass
 from isaaclab.visualizers import VisualizerCfg
 
 from ._impl.newton_manager_cfg import NewtonCfg
 from .spawners.materials import RigidBodyMaterialCfg
+
+
+def validate_device(device: str) -> str:
+    """Validate and ensure device is available on the current system.
+    
+    If CUDA is requested but not available, falls back to CPU with a warning.
+    
+    Args:
+        device: The requested device string (e.g., "cuda:0", "cpu")
+        
+    Returns:
+        The validated device string (either the original or "cpu" as fallback)
+    """
+    if "cuda" in device.lower() and not torch.cuda.is_available():
+        print(f"[WARNING] CUDA requested (device='{device}') but not available. Falling back to CPU.")
+        return "cpu"
+    return device
 
 
 @configclass
@@ -129,13 +148,17 @@ class SimulationCfg:
     """The prim path where the USD PhysicsScene is created. Default is "/physicsScene"."""
 
     device: str = "cuda:0"
-    """The device to run the simulation on. Default is ``"cuda:0"``.
+    """The device to run the simulation on. Default is ``"cuda:0"`` if CUDA is available, otherwise ``"cpu"``.
 
     Valid options are:
 
     - ``"cpu"``: Use CPU.
     - ``"cuda"``: Use GPU, where the device ID is inferred from :class:`~isaaclab.app.AppLauncher`'s config.
     - ``"cuda:N"``: Use GPU, where N is the device ID. For example, "cuda:0".
+    
+    Note:
+        If CUDA is not available (e.g., on macOS), the device will automatically fall back to "cpu"
+        regardless of the configured value.
     """
 
     dt: float = 1.0 / 60.0
@@ -184,6 +207,10 @@ class SimulationCfg:
         the renderer will not be able to render any updates in the simulation, although simulation will still be
         running under the hood.
     """
+
+    def __post_init__(self):
+        """Post-initialization to handle CUDA availability."""
+        self.device = validate_device(self.device)
 
     newton_cfg: NewtonCfg = NewtonCfg()
     """Newton manager settings. Default is NewtonCfg()."""

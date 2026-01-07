@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import MISSING
 from typing import Literal
 
+from isaaclab.sim.simulation_cfg import validate_device
 from isaaclab.utils import configclass
 
 from .rnd_cfg import RslRlRndCfg
@@ -139,7 +140,12 @@ class RslRlBaseRunnerCfg:
     """The seed for the experiment. Default is 42."""
 
     device: str = "cuda:0"
-    """The device for the rl-agent. Default is cuda:0."""
+    """The device for the rl-agent. Default is cuda:0 if CUDA is available, otherwise cpu.
+    
+    Note:
+        If CUDA is not available (e.g., on macOS), the device will automatically fall back to "cpu"
+        regardless of the configured value.
+    """
 
     num_steps_per_env: int = MISSING
     """The number of steps per environment per update."""
@@ -222,6 +228,10 @@ class RslRlBaseRunnerCfg:
 
     If regex expression, the latest (alphabetical order) matching file will be loaded.
     """
+
+    def __post_init__(self):
+        """Post-initialization to handle CUDA availability."""
+        self.device = validate_device(self.device)
 
 
 @configclass

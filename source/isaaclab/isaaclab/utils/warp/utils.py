@@ -13,6 +13,15 @@ import warp as wp
 
 logger = logging.getLogger(__name__)
 
+
+def _get_default_device() -> str:
+    """Get the default device based on CUDA availability.
+    
+    Returns:
+        "cuda:0" if CUDA is available, otherwise "cpu"
+    """
+    return "cuda:0" if torch.cuda.is_available() else "cpu"
+
 ##
 # Frontend conversions - Torch to Warp.
 ##
@@ -27,7 +36,7 @@ def make_complete_data_from_torch_single_index(
     N: int,
     ids: Sequence[int] | torch.Tensor | None = None,
     dtype: type = wp.float32,
-    device: str = "cuda:0",
+    device: str | None = None,
 ) -> wp.array:
     """Converts any Torch frontend data into warp data with single index support.
 
@@ -36,11 +45,14 @@ def make_complete_data_from_torch_single_index(
         N: The number of elements in the value.
         ids: The index ids.
         dtype: The dtype of the value.
-        device: The device to use for the conversion.
+        device: The device to use for the conversion. Defaults to "cuda:0" if available, else "cpu".
 
     Returns:
         A warp array.
     """
+    if device is None:
+        device = _get_default_device()
+    
     if ids is None:
         # No ids are provided, so we are expecting complete data.
         value = wp.from_torch(value, dtype=dtype)
@@ -59,7 +71,7 @@ def make_complete_data_from_torch_dual_index(
     first_ids: Sequence[int] | torch.Tensor | None = None,
     second_ids: Sequence[int] | torch.Tensor | None = None,
     dtype: type = wp.float32,
-    device: str = "cuda:0",
+    device: str | None = None,
 ) -> wp.array:
     """Converts any Torch frontend data into warp data with dual index support.
 
@@ -70,11 +82,14 @@ def make_complete_data_from_torch_dual_index(
         first_ids: The first index ids.
         second_ids: The second index ids.
         dtype: The dtype of the value.
-        device: The device to use for the conversion.
+        device: The device to use for the conversion. Defaults to "cuda:0" if available, else "cpu".
 
     Returns:
         A tuple of warp data with its two masks.
     """
+    if device is None:
+        device = _get_default_device()
+    
     if (first_ids is None) and (second_ids is None):
         # No ids are provided, so we are expecting complete data.
         value = wp.from_torch(value, dtype=dtype)
@@ -99,7 +114,7 @@ def make_masks_from_torch_ids(
     N: int,
     first_ids: Sequence[int] | torch.Tensor | None = None,
     first_mask: wp.array | torch.Tensor | None = None,
-    device: str = "cuda:0",
+    device: str | None = None,
 ) -> wp.array | None:
     """Converts any Torch frontend data into warp data with dual index support.
 
@@ -110,11 +125,14 @@ def make_masks_from_torch_ids(
         first_mask: The first index mask.
         second_mask: The second index mask.
         dtype: The dtype of the value.
-        device: The device to use for the conversion.
+        device: The device to use for the conversion. Defaults to "cuda:0" if available, else "cpu".
 
     Returns:
         A tuple of warp data with its two masks.
     """
+    if device is None:
+        device = _get_default_device()
+    
     if (first_ids is not None) and (first_mask is None):
         # Create a mask from scratch
         first_mask = torch.zeros(N, dtype=torch.bool, device=device)

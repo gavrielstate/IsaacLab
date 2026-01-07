@@ -453,6 +453,9 @@ class SimulationContext:
             )
         else:
             raise Exception(f"Device {self.device} is not supported.")
+        
+        # Set the device for Newton physics engine
+        NewtonManager.set_device(self.device)
 
     def _apply_physics_settings(self):
         """Sets various carb physics settings."""

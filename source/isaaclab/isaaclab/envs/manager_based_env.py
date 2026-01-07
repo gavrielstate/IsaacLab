@@ -14,6 +14,7 @@ from typing import Any
 from isaaclab.managers import ActionManager, EventManager, ObservationManager, RecorderManager
 from isaaclab.scene import InteractiveScene
 from isaaclab.sim import SimulationContext
+from isaaclab.sim.simulation_cfg import validate_device
 from isaaclab.sim.utils import use_stage
 from isaaclab.ui.widgets import ManagerLiveVisualizer
 from isaaclab.utils.seed import configure_seed
@@ -104,6 +105,9 @@ class ManagerBasedEnv:
             self.cfg.seed = self.seed(self.cfg.seed)
         else:
             logger.warning("Seed not set for the environment. The environment creation may not be deterministic.")
+
+        # Ensure device is valid for the current system (fallback to CPU if CUDA unavailable)
+        self.cfg.sim.device = validate_device(self.cfg.sim.device)
 
         # create a simulation context to control the simulator
         if SimulationContext.instance() is None:

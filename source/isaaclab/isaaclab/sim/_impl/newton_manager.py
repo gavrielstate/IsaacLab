@@ -8,6 +8,7 @@ from __future__ import annotations
 import numpy as np
 import re
 
+import torch
 import warp as wp
 from newton import Axis, Contacts, Control, Model, ModelBuilder, State, eval_fk
 from newton.examples import create_collision_pipeline
@@ -38,7 +39,7 @@ def flipped_match(x: str, y: str) -> re.Match | None:
 class NewtonManager:
     _builder: ModelBuilder = None
     _model: Model = None
-    _device: str = "cuda:0"
+    _device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
     _dt: float = 1.0 / 200.0
     _solver_dt: float = 1.0 / 200.0
     _num_substeps: int = 1
@@ -198,14 +199,21 @@ class NewtonManager:
                 NewtonManager._needs_collision_pipeline = True
 
         # Ensure we are using a CUDA enabled device
-        assert NewtonManager._device.startswith("cuda"), "NewtonManager only supports CUDA enabled devices"
+        # Note: CPU mode is supported but CUDA graphs are disabled
+        if not NewtonManager._device.startswith("cuda"):
+            print(f"[INFO] Running Newton on CPU device: {NewtonManager._device}. CUDA graphs are disabled.")
+            # Disable CUDA graph when using CPU
+            NewtonManager._cfg.use_cuda_graph = False
 
         # Capture the graph if CUDA is enabled
         with Timer(name="newton_cuda_graph", msg="CUDA graph took:", enable=True, format="ms"):
-            if NewtonManager._cfg.use_cuda_graph:
+            if NewtonManager._cfg.use_cuda_graph and NewtonManager._device.startswith("cuda"):
                 with wp.ScopedCapture() as capture:
                     NewtonManager.simulate()
                 NewtonManager._graph = capture.graph
+            elif NewtonManager._cfg.use_cuda_graph and not NewtonManager._device.startswith("cuda"):
+                print("[WARNING] CUDA graphs requested but device is CPU. Disabling CUDA graphs.")
+                NewtonManager._cfg.use_cuda_graph = False
 
     @classmethod
     def simulate(cls) -> None:
