@@ -221,17 +221,26 @@ class vision_camera(ManagerTermBase):
     def __call__(
         self, env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, normalize: bool = True
     ) -> torch.Tensor:  # obtain the input image
-        images = self.sensor.data.output[self.sensor_type]
-        torch.nan_to_num_(images, nan=1e6)
+        from isaaclab.utils.nvtx import NVTXMarker
+
+        with NVTXMarker.range("vision_camera:get_image"):
+            images = self.sensor.data.output[self.sensor_type]
+            torch.nan_to_num_(images, nan=1e6)
         if normalize:
-            images = self.norm_fn(images)
-            images = images.permute(0, 3, 1, 2).contiguous()
+            with NVTXMarker.range("vision_camera:normalize"):
+                images = self.norm_fn(images)
+            with NVTXMarker.range("vision_camera:permute"):
+                images = images.permute(0, 3, 1, 2).contiguous()
         return images
 
     def _rgb_norm(self, images: torch.Tensor) -> torch.Tensor:
-        images = images.float() / 255.0
-        mean_tensor = torch.mean(images, dim=(1, 2), keepdim=True)
-        images -= mean_tensor
+        from isaaclab.utils.nvtx import NVTXMarker
+
+        with NVTXMarker.range("vision_camera:rgb_norm_convert"):
+            images = images.float() / 255.0
+        with NVTXMarker.range("vision_camera:rgb_norm_mean"):
+            mean_tensor = torch.mean(images, dim=(1, 2), keepdim=True)
+            images -= mean_tensor
         return images
 
     def _depth_norm(self, images: torch.Tensor) -> torch.Tensor:

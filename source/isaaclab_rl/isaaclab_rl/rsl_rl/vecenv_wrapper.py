@@ -155,30 +155,37 @@ class RslRlVecEnvWrapper(VecEnv):
 
     def get_observations(self) -> TensorDict:
         """Returns the current observations of the environment."""
-        if hasattr(self.unwrapped, "observation_manager"):
-            obs_dict = self.unwrapped.observation_manager.compute()
-        else:
-            if isinstance(self.unwrapped, DirectRLEnvWarp):
-                self.unwrapped._get_observations()
-                obs_dict = {"policy": self.unwrapped.torch_obs_buf.clone()}
+        from isaaclab.utils.nvtx import NVTXMarker
+
+        with NVTXMarker.range("RslRlVecEnvWrapper:get_observations"):
+            if hasattr(self.unwrapped, "observation_manager"):
+                obs_dict = self.unwrapped.observation_manager.compute()
             else:
-                obs_dict = self.unwrapped._get_observations()
-        return TensorDict(obs_dict, batch_size=[self.num_envs])
+                if isinstance(self.unwrapped, DirectRLEnvWarp):
+                    self.unwrapped._get_observations()
+                    obs_dict = {"policy": self.unwrapped.torch_obs_buf.clone()}
+                else:
+                    obs_dict = self.unwrapped._get_observations()
+            return TensorDict(obs_dict, batch_size=[self.num_envs])
 
     def step(self, actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
+        from isaaclab.utils.nvtx import NVTXMarker
+
         # clip actions
         if self.clip_actions is not None:
             actions = torch.clamp(actions, -self.clip_actions, self.clip_actions)
         # record step information
-        obs_dict, rew, terminated, truncated, extras = self.env.step(actions)
+        with NVTXMarker.range("rsl_rl_wrapper:env_step"):
+            obs_dict, rew, terminated, truncated, extras = self.env.step(actions)
         # compute dones for compatibility with RSL-RL
-        dones = (terminated | truncated).to(dtype=torch.long)
-        # move time out information to the extras dict
-        # this is only needed for infinite horizon tasks
-        if not self.unwrapped.cfg.is_finite_horizon:
-            extras["time_outs"] = truncated
-        # return the step information
-        return TensorDict(obs_dict, batch_size=[self.num_envs]), rew.clone(), dones.clone(), extras
+        with NVTXMarker.range("rsl_rl_wrapper:postprocess"):
+            dones = (terminated | truncated).to(dtype=torch.long)
+            # move time out information to the extras dict
+            # this is only needed for infinite horizon tasks
+            if not self.unwrapped.cfg.is_finite_horizon:
+                extras["time_outs"] = truncated
+            # return the step information
+            return TensorDict(obs_dict, batch_size=[self.num_envs]), rew.clone(), dones.clone(), extras
 
     def close(self):  # noqa: D102
         return self.env.close()

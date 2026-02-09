@@ -135,6 +135,10 @@ class DirectRLEnv(gym.Env):
                 # attach_stage_to_usd_context()
         print("[INFO]: Scene manager: ", self.scene)
 
+        # cache whether rendering is needed (checked once after scene creation)
+        # this avoids checking camera sensors at every step
+        self._needs_rendering = self.sim.needs_rendering(scene=self.scene)
+
         # set up camera viewport controller
         # viewport is not available in other rendering modes so the function will throw a warning
         # FIXME: This needs to be fixed in the future when we unify the UI functionalities even for
@@ -352,7 +356,8 @@ class DirectRLEnv(gym.Env):
 
         # check if we need to do rendering within the physics loop
         # note: checked here once to avoid multiple checks within the loop
-        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
+        # uses cached value computed during initialization
+        is_rendering = self._needs_rendering
 
         # perform physics stepping
         for _ in range(self.cfg.decimation):

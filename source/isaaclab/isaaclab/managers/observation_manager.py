@@ -325,15 +325,18 @@ class ObservationManager(ManagerBase):
             The observations are either concatenated into a single tensor or returned as a dictionary
             with keys corresponding to the term's name.
         """
-        # create a buffer for storing obs from all the groups
-        obs_buffer = dict()
-        # iterate over all the terms in each group
-        for group_name in self._group_obs_term_names:
-            obs_buffer[group_name] = self.compute_group(group_name, update_history=update_history)
-        # otherwise return a dict with observations of all groups
+        from isaaclab.utils.nvtx import NVTXMarker
 
-        # Cache the observations.
-        self._obs_buffer = obs_buffer
+        with NVTXMarker.range("obs_compute:all_groups"):
+            # create a buffer for storing obs from all the groups
+            obs_buffer = dict()
+            # iterate over all the terms in each group
+            for group_name in self._group_obs_term_names:
+                obs_buffer[group_name] = self.compute_group(group_name, update_history=update_history)
+            # otherwise return a dict with observations of all groups
+
+            # Cache the observations.
+            self._obs_buffer = obs_buffer
         return obs_buffer
 
     def compute_group(self, group_name: str, update_history: bool = False) -> torch.Tensor | dict[str, torch.Tensor]:
@@ -377,57 +380,61 @@ class ObservationManager(ManagerBase):
                 f"Unable to find the group '{group_name}' in the observation manager."
                 f" Available groups are: {list(self._group_obs_term_names.keys())}"
             )
-        # iterate over all the terms in each group
-        group_term_names = self._group_obs_term_names[group_name]
-        # buffer to store obs per group
-        group_obs = dict.fromkeys(group_term_names, None)
-        # read attributes for each term
-        obs_terms = zip(group_term_names, self._group_obs_term_cfgs[group_name])
+        from isaaclab.utils.nvtx import NVTXMarker
 
-        # evaluate terms: compute, add noise, clip, scale, custom modifiers
-        for term_name, term_cfg in obs_terms:
-            # compute term's value
-            obs: torch.Tensor = term_cfg.func(self._env, **term_cfg.params).clone()
-            # apply post-processing
-            if term_cfg.modifiers is not None:
-                for modifier in term_cfg.modifiers:
-                    obs = modifier.func(obs, **modifier.params)
-            if isinstance(term_cfg.noise, noise.NoiseCfg):
-                obs = term_cfg.noise.func(obs, term_cfg.noise)
-            elif isinstance(term_cfg.noise, noise.NoiseModelCfg) and term_cfg.noise.func is not None:
-                obs = term_cfg.noise.func(obs)
-            if term_cfg.clip:
-                obs = obs.clip_(min=term_cfg.clip[0], max=term_cfg.clip[1])
-            if term_cfg.scale is not None:
-                obs = obs.mul_(term_cfg.scale)
-            # Update the history buffer if observation term has history enabled
-            if term_cfg.history_length > 0:
-                circular_buffer = self._group_obs_term_history_buffer[group_name][term_name]
-                if update_history:
-                    circular_buffer.append(obs)
-                elif circular_buffer._buffer is None:
-                    # because circular buffer only exits after the simulation steps,
-                    # this guards history buffer from corruption by external calls before simulation start
-                    circular_buffer = CircularBuffer(
-                        max_len=circular_buffer.max_length,
-                        batch_size=circular_buffer.batch_size,
-                        device=circular_buffer.device,
-                    )
-                    circular_buffer.append(obs)
+        with NVTXMarker.range(f"obs_compute_group:{group_name}"):
+            # iterate over all the terms in each group
+            group_term_names = self._group_obs_term_names[group_name]
+            # buffer to store obs per group
+            group_obs = dict.fromkeys(group_term_names, None)
+            # read attributes for each term
+            obs_terms = zip(group_term_names, self._group_obs_term_cfgs[group_name])
 
-                if term_cfg.flatten_history_dim:
-                    group_obs[term_name] = circular_buffer.buffer.reshape(self._env.num_envs, -1)
-                else:
-                    group_obs[term_name] = circular_buffer.buffer
+            # evaluate terms: compute, add noise, clip, scale, custom modifiers
+            for term_name, term_cfg in obs_terms:
+                with NVTXMarker.range(f"obs_term:{group_name}:{term_name}"):
+                    # compute term's value
+                    obs: torch.Tensor = term_cfg.func(self._env, **term_cfg.params).clone()
+                    # apply post-processing
+                    if term_cfg.modifiers is not None:
+                        for modifier in term_cfg.modifiers:
+                            obs = modifier.func(obs, **modifier.params)
+                    if isinstance(term_cfg.noise, noise.NoiseCfg):
+                        obs = term_cfg.noise.func(obs, term_cfg.noise)
+                    elif isinstance(term_cfg.noise, noise.NoiseModelCfg) and term_cfg.noise.func is not None:
+                        obs = term_cfg.noise.func(obs)
+                    if term_cfg.clip:
+                        obs = obs.clip_(min=term_cfg.clip[0], max=term_cfg.clip[1])
+                    if term_cfg.scale is not None:
+                        obs = obs.mul_(term_cfg.scale)
+                    # Update the history buffer if observation term has history enabled
+                    if term_cfg.history_length > 0:
+                        circular_buffer = self._group_obs_term_history_buffer[group_name][term_name]
+                        if update_history:
+                            circular_buffer.append(obs)
+                        elif circular_buffer._buffer is None:
+                            # because circular buffer only exits after the simulation steps,
+                            # this guards history buffer from corruption by external calls before simulation start
+                            circular_buffer = CircularBuffer(
+                                max_len=circular_buffer.max_length,
+                                batch_size=circular_buffer.batch_size,
+                                device=circular_buffer.device,
+                            )
+                            circular_buffer.append(obs)
+
+                        if term_cfg.flatten_history_dim:
+                            group_obs[term_name] = circular_buffer.buffer.reshape(self._env.num_envs, -1)
+                        else:
+                            group_obs[term_name] = circular_buffer.buffer
+                    else:
+                        group_obs[term_name] = obs
+
+            # concatenate all observations in the group together
+            if self._group_obs_concatenate[group_name]:
+                # set the concatenate dimension, account for the batch dimension if positive dimension is given
+                return torch.cat(list(group_obs.values()), dim=self._group_obs_concatenate_dim[group_name])
             else:
-                group_obs[term_name] = obs
-
-        # concatenate all observations in the group together
-        if self._group_obs_concatenate[group_name]:
-            # set the concatenate dimension, account for the batch dimension if positive dimension is given
-            return torch.cat(list(group_obs.values()), dim=self._group_obs_concatenate_dim[group_name])
-        else:
-            return group_obs
+                return group_obs
 
     def serialize(self) -> dict:
         """Serialize the observation term configurations for all active groups.

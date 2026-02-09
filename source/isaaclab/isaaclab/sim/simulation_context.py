@@ -603,6 +603,52 @@ class SimulationContext:
         """
         return self.settings.get("/isaaclab/render/rtx_sensors")
 
+    def has_camera_sensors(self, scene=None) -> bool:
+        """Returns whether the simulation has any camera sensors that require rendering.
+
+        This function checks for camera sensors in the scene, regardless of renderer type.
+        It detects both RTX cameras (via has_rtx_sensors()) and other camera types
+        (e.g., Newton/warp cameras) by inspecting the scene's sensors.
+
+        Args:
+            scene: Optional scene object to check for camera sensors. If None, only checks
+                for RTX sensors via the settings flag. If provided, also checks scene.sensors
+                for Camera and TiledCamera instances.
+
+        Returns:
+            True if the simulation has any camera sensors that require rendering, False otherwise.
+        """
+        # Check for RTX sensors (handled via settings flag)
+        if self.has_rtx_sensors():
+            return True
+
+        # Check scene for other camera types (e.g., Newton/warp cameras)
+        if scene is not None and hasattr(scene, "sensors"):
+            # Import here to avoid circular dependencies
+            from isaaclab.sensors.camera import Camera, TiledCamera
+
+            return any(isinstance(sensor, (Camera, TiledCamera)) for sensor in scene.sensors.values())
+
+        return False
+
+    def needs_rendering(self, scene=None) -> bool:
+        """Returns whether rendering is needed in the simulation.
+
+        This is a unified check that combines GUI rendering and camera sensor rendering.
+        Rendering is needed if:
+        1. GUI is enabled (for visualization)
+        2. Any camera sensors are present (RTX or other renderer types)
+
+        Args:
+            scene: Optional scene object to check for camera sensors. If None, only checks
+                for RTX sensors via the settings flag. If provided, also checks scene.sensors
+                for Camera and TiledCamera instances.
+
+        Returns:
+            True if rendering is needed, False otherwise.
+        """
+        return self.has_gui() or self.has_camera_sensors(scene)
+
     def is_fabric_enabled(self) -> bool:
         """Returns whether the fabric interface is enabled.
 

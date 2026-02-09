@@ -151,6 +151,10 @@ class ManagerBasedEnv:
                 # attach_stage_to_usd_context()
         print("[INFO]: Scene manager: ", self.scene)
 
+        # cache whether rendering is needed (checked once after scene creation)
+        # this avoids checking camera sensors at every step
+        self._needs_rendering = self.sim.needs_rendering(scene=self.scene)
+
         # set up camera viewport controller
         # viewport is not available in other rendering modes so the function will throw a warning
         # FIXME: This needs to be fixed in the future when we unify the UI functionalities even for
@@ -482,24 +486,32 @@ class ManagerBasedEnv:
 
         # check if we need to do rendering within the physics loop
         # note: checked here once to avoid multiple checks within the loop
-        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
+        # uses cached value computed during initialization
+        is_rendering = self._needs_rendering
 
         # perform physics stepping
-        for _ in range(self.cfg.decimation):
-            self._sim_step_counter += 1
-            # set actions into buffers
-            self.action_manager.apply_action()
-            # set actions into simulator
-            self.scene.write_data_to_sim()
-            # simulate
-            self.sim.step(render=False)
-            # render between steps only if the GUI or an RTX sensor needs it
-            # note: we assume the render interval to be the shortest accepted rendering interval.
-            #    If a camera needs rendering at a faster frequency, this will lead to unexpected behavior.
-            if self._sim_step_counter % self.cfg.sim.render_interval == 0 and is_rendering:
-                self.sim.render()
-            # update buffers at sim dt
-            self.scene.update(dt=self.physics_dt)
+        from isaaclab.utils.nvtx import NVTXMarker
+
+        with NVTXMarker.range("env_step:physics_loop"):
+            for _ in range(self.cfg.decimation):
+                self._sim_step_counter += 1
+                # set actions into buffers
+                with NVTXMarker.range("env_step:apply_action"):
+                    self.action_manager.apply_action()
+                    # set actions into simulator
+                    self.scene.write_data_to_sim()
+                # simulate
+                with NVTXMarker.range("env_step:sim_step"):
+                    self.sim.step(render=False)
+                # render between steps only if the GUI or an RTX sensor needs it
+                # note: we assume the render interval to be the shortest accepted rendering interval.
+                #    If a camera needs rendering at a faster frequency, this will lead to unexpected behavior.
+                if self._sim_step_counter % self.cfg.sim.render_interval == 0 and is_rendering:
+                    with NVTXMarker.range("env_step:render"):
+                        self.sim.render()
+                # update buffers at sim dt
+                with NVTXMarker.range("env_step:scene_update"):
+                    self.scene.update(dt=self.physics_dt)
 
         # post-step: step interval event
         if "interval" in self.event_manager.available_modes:
