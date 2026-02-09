@@ -109,6 +109,13 @@ class RslRlActorCriticCNNCfg(RslRlPpoActorCriticCfg):
     critic_cnn_cfg: list[CNNCfg] | CNNCfg | None = MISSING
     """The CNN configuration for the critic network."""
 
+    # ResNet18 encoder options
+    use_resnet18: bool = False
+    """Whether to use ResNet18 encoder instead of custom CNN. Defaults to False."""
+
+    resnet18_output_dim: int = 32
+    """Output dimension for ResNet18 encoder. Defaults to 32."""
+
 
 ############################
 # Algorithm configurations #

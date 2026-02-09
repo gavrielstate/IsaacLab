@@ -6,6 +6,7 @@
 from dataclasses import MISSING
 
 import isaaclab.sim as sim_utils
+from isaaclab.envs.mdp import observations as mdp_obs
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
@@ -78,11 +79,11 @@ class KukaAllegroDuoTiledCameraSceneCfg(KukaAllegroSingleTiledCameraSceneCfg):
 
 @configclass
 class KukaAllegroSingleCameraObservationsCfg(kuka_allegro_dexsuite.KukaAllegroObservationCfg):
-    """Observation specifications for the MDP."""
+    """Observation specifications for the MDP (CNN variant - uses raw images)."""
 
     @configclass
     class BaseImageObsCfg(ObsGroup):
-        """Camera observations for policy group."""
+        """Camera observations for policy group (using raw images with vision_camera)."""
 
         object_observation_b = ObsTerm(
             func=mdp.vision_camera,
@@ -92,6 +93,41 @@ class KukaAllegroSingleCameraObservationsCfg(kuka_allegro_dexsuite.KukaAllegroOb
         )
 
     base_image: BaseImageObsCfg = BaseImageObsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        for group in self.__dataclass_fields__.values():
+            obs_group = getattr(self, group.name)
+            obs_group.history_length = None
+
+
+@configclass
+class KukaAllegroSingleCameraResNetObservationsCfg(kuka_allegro_dexsuite.KukaAllegroObservationCfg):
+    """Observation specifications for the MDP (ResNet variant - uses ResNet18 features)."""
+
+    @configclass
+    class ResNetFeaturesObsCfg(ObsGroup):
+        """ResNet18 feature extraction for policy group.
+
+        This observation group uses a frozen, pretrained ResNet18 model (ImageNet weights)
+        to extract 512-dimensional features from camera images. The ResNet is framework-agnostic
+        and runs at the observation level, making it compatible with any RL framework.
+
+        The model is automatically downloaded and cached by torchvision on first use.
+        """
+
+        resnet_features = ObsTerm(
+            func=mdp_obs.image_features,
+            noise=Unoise(n_min=-0.0, n_max=0.0),
+            params={
+                "sensor_cfg": SceneEntityCfg("base_camera"),
+                "data_type": "rgb",
+                "model_name": "resnet18",
+                # model_device defaults to env.device if not specified
+            },
+        )
+
+    resnet_features: ResNetFeaturesObsCfg = ResNetFeaturesObsCfg()
 
     def __post_init__(self):
         super().__post_init__()
@@ -180,6 +216,19 @@ class KukaAllegroSingleCameraMixinCfg(kuka_allegro_dexsuite.KukaAllegroMixinCfg)
 
 
 @configclass
+class KukaAllegroSingleCameraResNetMixinCfg(kuka_allegro_dexsuite.KukaAllegroMixinCfg):
+    """Mixin config for ResNet18 feature-based observations (framework-agnostic, frozen ResNet)."""
+
+    scene = KukaAllegroSingleTiledCameraSceneCfg(num_envs=4096, env_spacing=3, replicate_physics=True)
+    observations: KukaAllegroSingleCameraResNetObservationsCfg = (
+        KukaAllegroSingleCameraResNetObservationsCfg()
+    )
+
+    def __post_init__(self: kuka_allegro_dexsuite.DexsuiteKukaAllegroLiftEnvCfg):
+        super().__post_init__()
+
+
+@configclass
 class KukaAllegroDuoCameraMixinCfg(kuka_allegro_dexsuite.KukaAllegroMixinCfg):
     scene = KukaAllegroDuoTiledCameraSceneCfg(num_envs=4096, env_spacing=3, replicate_physics=True)
     observations: KukaAllegroDuoCameraObservationsCfg = KukaAllegroDuoCameraObservationsCfg()
@@ -189,10 +238,18 @@ class KukaAllegroDuoCameraMixinCfg(kuka_allegro_dexsuite.KukaAllegroMixinCfg):
         # self.variants.setdefault("scene", {}).update(duo_camera_variants)
 
 
-# SingleCamera
+# SingleCamera (CNN variant)
 @configclass
 class DexsuiteKukaAllegroLiftSingleCameraEnvCfg(
     KukaAllegroSingleCameraMixinCfg, dexsuite_state_impl.DexsuiteLiftEnvCfg
+):
+    pass
+
+
+# SingleCamera (ResNet variant)
+@configclass
+class DexsuiteKukaAllegroLiftSingleCameraResNetEnvCfg(
+    KukaAllegroSingleCameraResNetMixinCfg, dexsuite_state_impl.DexsuiteLiftEnvCfg
 ):
     pass
 

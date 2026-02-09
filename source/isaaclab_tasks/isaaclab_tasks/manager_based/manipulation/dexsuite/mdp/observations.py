@@ -216,7 +216,14 @@ class vision_camera(ManagerTermBase):
         sensor_cfg: SceneEntityCfg = cfg.params.get("sensor_cfg", SceneEntityCfg("tiled_camera"))
         self.sensor: TiledCamera = env.scene.sensors[sensor_cfg.name]
         self.sensor_type = self.sensor.cfg.data_types[0]
-        self.norm_fn = self._depth_norm if self.sensor_type == "distance_to_image_plane" else self._rgb_norm
+        # Check if ImageNet normalization should be used (for ResNet)
+        self.use_imagenet_norm = cfg.params.get("use_imagenet_norm", False)
+        if self.sensor_type == "distance_to_image_plane":
+            self.norm_fn = self._depth_norm
+        elif self.use_imagenet_norm:
+            self.norm_fn = self._rgb_norm_imagenet
+        else:
+            self.norm_fn = self._rgb_norm
 
     def __call__(
         self, env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, normalize: bool = True
@@ -234,6 +241,7 @@ class vision_camera(ManagerTermBase):
         return images
 
     def _rgb_norm(self, images: torch.Tensor) -> torch.Tensor:
+        """Per-image mean subtraction normalization (for custom CNN)."""
         from isaaclab.utils.nvtx import NVTXMarker
 
         with NVTXMarker.range("vision_camera:rgb_norm_convert"):
@@ -241,6 +249,18 @@ class vision_camera(ManagerTermBase):
         with NVTXMarker.range("vision_camera:rgb_norm_mean"):
             mean_tensor = torch.mean(images, dim=(1, 2), keepdim=True)
             images -= mean_tensor
+        return images
+
+    def _rgb_norm_imagenet(self, images: torch.Tensor) -> torch.Tensor:
+        """ImageNet-style normalization: just scale to [0, 1] (for ResNet).
+
+        ResNet encoder will apply ImageNet mean/std normalization internally.
+        """
+        from isaaclab.utils.nvtx import NVTXMarker
+
+        with NVTXMarker.range("vision_camera:rgb_norm_convert"):
+            images = images.float() / 255.0
+        # No mean subtraction - ResNet encoder handles ImageNet normalization
         return images
 
     def _depth_norm(self, images: torch.Tensor) -> torch.Tensor:

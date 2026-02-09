@@ -5,11 +5,27 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlActorCriticCNNCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import (
+    RslRlActorCriticCNNCfg,
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
+)
 
 
 @configclass
 class DexsuiteKukaAllegroPPOCNNRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO runner config for Kuka Allegro with CNN.
+
+    This configuration uses raw camera images processed through a custom 3-layer CNN
+    (16, 32, 64 channels) before the MLP policy network. The CNN is trained end-to-end
+    with the policy.
+
+    Observation groups:
+        - policy: ["policy", "proprio", "base_image"] (raw images)
+        - critic: ["policy", "proprio", "perception"] (point cloud)
+    """
+
     num_steps_per_env = 32
     max_iterations = 15000
     save_interval = 250
@@ -29,6 +45,56 @@ class DexsuiteKukaAllegroPPOCNNRunnerCfg(RslRlOnPolicyRunnerCfg):
             norm="batch",
             global_pool="avg",
         ),
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.005,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=1.0e-3,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
+class DexsuiteKukaAllegroPPOResNetRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO runner config for Kuka Allegro with ResNet18 features.
+
+    This configuration uses frozen, pretrained ResNet18 features (512-dim) extracted
+    at the observation level. The ResNet is framework-agnostic and runs outside the
+    policy network, making it compatible with any RL framework.
+
+    The ResNet18 model uses ImageNet pretrained weights and is automatically downloaded
+    and cached by torchvision on first use.
+
+    Observation groups:
+        - policy: ["policy", "proprio", "resnet_features"] (512-dim ResNet features)
+        - critic: ["policy", "proprio", "perception"] (point cloud)
+
+    Note:
+        The policy network uses a smaller MLP (256, 128, 64) since ResNet already provides
+        rich 512-dimensional features, compared to the CNN variant which processes raw images.
+    """
+
+    num_steps_per_env = 32
+    max_iterations = 15000
+    save_interval = 250
+    experiment_name = "dexsuite_kuka_allegro_resnet_features"
+    obs_groups = {"policy": ["policy", "proprio", "resnet_features"], "critic": ["policy", "proprio", "perception"]}
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        # ResNet18 outputs 512-dim features, so we can use a smaller first layer
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
         activation="elu",
     )
     algorithm = RslRlPpoAlgorithmCfg(
