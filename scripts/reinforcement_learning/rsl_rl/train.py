@@ -117,8 +117,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # multi-gpu training configuration
         if args_cli.distributed:
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            env_cfg.sim.device = f"cuda:{local_rank}"
-            agent_cfg.device = f"cuda:{local_rank}"
+            # When CUDA_VISIBLE_DEVICES limits each process to one GPU, use cuda:0;
+            # otherwise use cuda:{local_rank} so each rank uses a distinct GPU.
+            num_visible = torch.cuda.device_count()
+            world_size = int(os.getenv("WORLD_SIZE", "1"))
+            if num_visible >= world_size:
+                env_cfg.sim.device = f"cuda:{local_rank}"
+            else:
+                env_cfg.sim.device = "cuda:0"
+            agent_cfg.device = env_cfg.sim.device
+
+            # Set current CUDA device before any sim/env creation so physics backends
+            # (e.g. Newton/Warp) that use the current device get the correct GPU.
+            if "cuda" in env_cfg.sim.device:
+                torch.cuda.set_device(env_cfg.sim.device)
 
             # set seed to have diversity in different threads
             seed = agent_cfg.seed + local_rank

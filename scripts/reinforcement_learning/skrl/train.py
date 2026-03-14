@@ -20,6 +20,7 @@ import time
 from datetime import datetime
 
 import gymnasium as gym
+import torch
 import skrl
 from packaging import version
 
@@ -128,7 +129,11 @@ def main():
         # multi-gpu training config
         if args_cli.distributed:
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            env_cfg.sim.device = f"cuda:{local_rank}"
+            num_visible = torch.cuda.device_count()
+            world_size = int(os.getenv("WORLD_SIZE", "1"))
+            env_cfg.sim.device = f"cuda:{local_rank}" if num_visible >= world_size else "cuda:0"
+            if "cuda" in env_cfg.sim.device:
+                torch.cuda.set_device(env_cfg.sim.device)
         # max iterations for training
         if args_cli.max_iterations:
             agent_cfg["trainer"]["timesteps"] = args_cli.max_iterations * agent_cfg["agent"]["rollouts"]

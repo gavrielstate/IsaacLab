@@ -134,11 +134,16 @@ def main(
     world_size = 1
     world_rank = 0
     if args_cli.distributed:
-        env_cfg.sim.device = f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}"
-        world_size = int(os.getenv("WORLD_SIZE", 1))
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        num_visible = torch.cuda.device_count()
+        world_size = int(os.getenv("WORLD_SIZE", "1"))
+        env_cfg.sim.device = f"cuda:{local_rank}" if num_visible >= world_size else "cuda:0"
+        if "cuda" in env_cfg.sim.device:
+            torch.cuda.set_device(env_cfg.sim.device)
         world_rank = int(os.getenv("RANK", "0"))
 
     task_startup_time_begin = time.perf_counter_ns()
+
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)

@@ -17,6 +17,7 @@ from datetime import datetime
 from distutils.util import strtobool
 
 import gymnasium as gym
+import torch
 from rl_games.common import env_configurations, vecenv
 from rl_games.common.algo_observer import IsaacAlgoObserver
 from rl_games.torch_runner import Runner
@@ -111,11 +112,16 @@ def main():
         # multi-gpu training config
         if args_cli.distributed:
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            agent_cfg["params"]["seed"] += int(os.getenv("RANK", "0"))
-            agent_cfg["params"]["config"]["device"] = f"cuda:{local_rank}"
-            agent_cfg["params"]["config"]["device_name"] = f"cuda:{local_rank}"
+            num_visible = torch.cuda.device_count()
+            world_size = int(os.getenv("WORLD_SIZE", "1"))
+            sim_device = f"cuda:{local_rank}" if num_visible >= world_size else "cuda:0"
+            env_cfg.sim.device = sim_device
+            agent_cfg["params"]["config"]["device"] = sim_device
+            agent_cfg["params"]["config"]["device_name"] = sim_device
             agent_cfg["params"]["config"]["multi_gpu"] = True
-            env_cfg.sim.device = f"cuda:{local_rank}"
+            if "cuda" in sim_device:
+                torch.cuda.set_device(sim_device)
+            agent_cfg["params"]["seed"] += int(os.getenv("RANK", "0"))
 
         # set the environment seed (after multi-gpu config for updated rank from agent seed)
         env_cfg.seed = agent_cfg["params"]["seed"]

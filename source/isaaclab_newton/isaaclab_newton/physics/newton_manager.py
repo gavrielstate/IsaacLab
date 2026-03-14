@@ -105,6 +105,13 @@ class NewtonManager(PhysicsManager):
         """
         super().initialize(sim_context)
 
+        # Warm up Warp's device context for this process so downstream allocations
+        # (e.g. mujoco_warp collision context) succeed in distributed multi-GPU runs.
+        if "cuda" in PhysicsManager._device:
+            with wp.ScopedDevice(PhysicsManager._device):
+                _ = wp.zeros(1, dtype=wp.float32)
+            wp.synchronize_device(PhysicsManager._device)
+
         # Newton-specific setup: get gravity from SimulationCfg (not physics manager cfg)
         sim = PhysicsManager._sim
         if sim is not None:

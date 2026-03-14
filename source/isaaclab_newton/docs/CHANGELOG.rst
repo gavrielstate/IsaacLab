@@ -2,6 +2,19 @@ Changelog
 ---------
 
 
+0.5.9 (2026-03-14)
+~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed ``RuntimeError: Failed to allocate ... on device 'cuda:N'`` when running
+  distributed training with Newton physics on multi-GPU machines. Warp's device
+  context is now warmed up in :meth:`~isaaclab_newton.physics.NewtonManager.initialize`
+  so that downstream allocations (e.g. mujoco_warp collision context) succeed
+  in each process. 
+
+
 0.5.8 (2026-03-13)
 ~~~~~~~~~~~~~~~~~~
 

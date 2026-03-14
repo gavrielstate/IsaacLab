@@ -166,8 +166,15 @@ def main(
     # process distributed
     world_rank = 0
     if args_cli.distributed:
-        env_cfg.sim.device = f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}"
-        agent_cfg["params"]["config"]["device"] = f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}"
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        num_visible = torch.cuda.device_count()
+        world_size = int(os.getenv("WORLD_SIZE", "1"))
+        sim_device = f"cuda:{local_rank}" if num_visible >= world_size else "cuda:0"
+        env_cfg.sim.device = sim_device
+        agent_cfg["params"]["config"]["device"] = sim_device
+        agent_cfg["params"]["config"]["device_name"] = sim_device
+        if "cuda" in sim_device:
+            torch.cuda.set_device(sim_device)
         world_rank = int(os.getenv("RANK", "0"))
 
     # specify directory for logging experiments
@@ -181,14 +188,10 @@ def main(
     agent_cfg["params"]["config"]["train_dir"] = log_root_path
     agent_cfg["params"]["config"]["full_experiment_name"] = log_dir
 
-    # multi-gpu training config
+    # multi-gpu training config (device already set above when args_cli.distributed)
     if args_cli.distributed:
         agent_cfg["params"]["seed"] += int(os.getenv("RANK", "0"))
-        agent_cfg["params"]["config"]["device"] = f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}"
-        agent_cfg["params"]["config"]["device_name"] = f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}"
         agent_cfg["params"]["config"]["multi_gpu"] = True
-        # update env config device
-        env_cfg.sim.device = f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}"
 
     # max iterations
     if args_cli.max_iterations:
