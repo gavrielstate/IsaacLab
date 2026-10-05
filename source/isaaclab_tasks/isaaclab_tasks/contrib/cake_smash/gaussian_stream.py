@@ -1,0 +1,135 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Render-only skinning of exterior and interior cake Gaussians."""
+
+from pathlib import Path
+
+import numpy as np
+import warp as wp
+from isaaclab_newton.physics import NewtonManager
+from scipy.spatial import cKDTree
+
+from pxr import Sdf, Usd, UsdGeom, Vt
+
+from isaaclab_contrib.mpm_gaussians import Binding, GaussianArrayStream, GaussianLocalFrame
+
+
+class CakeGaussianStream:
+    """Consume native Newton material frames with Nicolas' Gaussian binding.
+
+    Construct before stepping the environment. This task has no actuators and
+    exactly one MPM substep per Newton manager step, so its post-step callback
+    integrates display frames at the actual MPM rate. Folded robot decimation
+    needs a different scheduling hook and is deliberately rejected here.
+    """
+
+    def __init__(self, env, asset_path: str):
+        self.env = env
+        self._array_stream = None
+        if env.common_step_counter != 0 or NewtonManager._graph is not None:
+            raise ValueError("Construct the cake Gaussian stream before advancing physics.")
+        cfg = env.cfg.sim.physics
+        if NewtonManager.handles_decimation() or cfg.num_substeps != 1:
+            raise ValueError("Cake display frames require one MPM substep per manager step, without folded decimation.")
+        entry = next(entry for entry in cfg.solver_cfg.entries if entry.name == "cake")
+        if entry.substeps != 1:
+            raise ValueError("Cake display frames require exactly one MPM entry substep.")
+        self.source = Usd.Stage.Open(str(Path(asset_path).expanduser().resolve()))
+        if self.source is None:
+            raise ValueError(f"Cannot open cake Gaussian USD: {asset_path}")
+        prim = self.source.GetPrimAtPath("/World/Cake")
+        if not prim or prim.GetTypeName() != "ParticleField3DGaussianSplat":
+            raise ValueError("Cake Gaussian USD must contain /World/Cake as ParticleField3DGaussianSplat.")
+        self.asset = {
+            key: np.asarray(prim.GetAttribute(attribute).Get(), np.float32).copy()
+            for key, attribute in (("xyz", "positions"), ("scales", "scales"), ("rotations", "orientations"))
+        }
+        model = NewtonManager.get_model()
+        rest = model.particle_q.numpy()
+        physical_regions = np.full(len(rest), -1, np.int32)
+        ranges = NewtonManager.backend.particle_ranges
+        for component, name in enumerate(env.component_names):
+            matches = [interval for path, interval in ranges.items() if f"/CakeLayers/{name}/" in path]
+            if len(matches) != 1:
+                raise ValueError(f"Expected exactly one imported particle range for cake component {name}.")
+            start, count = matches[0]
+            physical_regions[start : start + count] = component
+        if np.any(physical_regions < 0):
+            raise ValueError("Every imported particle must belong to a cake layer.")
+        visual_regions = np.asarray(prim.GetAttribute("cake:component_ids").Get(), np.int32).copy()
+        if len(visual_regions) != len(self.asset["xyz"]):
+            raise ValueError("Expected one material component per Gaussian.")
+        # Decorative frosting curls inherit the nearest physical layer. Named
+        # layer Gaussians retain their explicit component, even across interfaces.
+        decoration = visual_regions < 0
+        nearest = cKDTree(rest).query(self.asset["xyz"][decoration])[1]
+        visual_regions[decoration] = physical_regions[nearest]
+        self.asset["regions"] = visual_regions
+        # NewtonManager has no public solver accessor in this checkout. This
+        # isolated access is the only bridge to its existing native coupler.
+        coupled = NewtonManager._solver
+        self.solver = coupled.solver("cake")
+        self.state = coupled.entry_state("cake")
+        self.path = "/World/CakeGaussians"
+        with wp.ScopedDevice(model.device):
+            self.binding = Binding(self.asset, rest, physical_regions)
+            self.frame = GaussianLocalFrame(self.asset["xyz"], self.asset["scales"], model.device)
+            self.binding.deform_gpu(env.particle_positions, self.state.mpm.particle_transform, host=False)
+        NewtonManager.register_post_step_callback(self.advance_frames)
+
+    def advance_frames(self) -> None:
+        """Integrate native display frames at each MPM tick; leave dynamics alone."""
+        self.solver.update_particle_frames(self.state, self.state, self.env.cfg.sim.dt)
+
+    def author(self, stage: Usd.Stage) -> None:
+        """Copy the external field and its authored radiance materials."""
+        layer = self.source.Flatten()
+        Sdf.CreatePrimInLayer(stage.GetRootLayer(), "/World")
+        Sdf.CopySpec(layer, "/World/Looks", stage.GetRootLayer(), "/World/Looks")
+        Sdf.CopySpec(layer, "/World/Cake", stage.GetRootLayer(), self.path)
+        prim = stage.GetPrimAtPath(self.path)
+        for name in ("positions", "scales", "orientations"):
+            attr = prim.GetAttribute(name)
+            value = attr.Get()
+            attr.Set(value, 0)
+            attr.Set(value, 1)
+        xyz, scales = self.asset["xyz"], self.asset["scales"]
+        extent = np.array([(xyz - 3 * scales).min(0), (xyz + 3 * scales).max(0)], np.float32)
+        UsdGeom.Boundable(prim).CreateExtentAttr(Vt.Vec3fArray.FromNumpy(extent))
+
+    def bind(self, renderer) -> None:
+        self._array_stream = GaussianArrayStream(
+            renderer, [self.path], {"positions": 3, "scales": 3, "orientations": 4}
+        )
+
+    def prepare(self):
+        with wp.ScopedDevice(self.env.particle_positions.device):
+            xyz, scales, rotations = self.binding.deform_gpu(
+                self.env.particle_positions, self.state.mpm.particle_transform, host=False
+            )
+            xyz, scales, transform = self.frame.evaluate(xyz, scales)
+        return transform, {"positions": [xyz], "scales": [scales], "orientations": [rotations]}
+
+    def update(self, renderer, prepared) -> None:
+        from ovrtx import Semantic  # noqa: PLC0415
+
+        transform, values = prepared
+        renderer.write_attribute(
+            prim_paths=[self.path], attribute_name="omni:xform", tensor=transform[None], semantic=Semantic.XFORM_MAT4x4
+        )
+        self._array_stream.write(values)
+
+    def verify(self, renderer, prepared) -> None:
+        """Read back published arrays outside timing; visible frames still need inspection."""
+        _, values = prepared
+        self._array_stream.verify(
+            renderer, {name: [array.numpy() for array in arrays] for name, arrays in values.items()}
+        )
+
+    def close(self) -> None:
+        NewtonManager.unregister_post_step_callback(self.advance_frames)
+        if self._array_stream is not None:
+            self._array_stream.close()

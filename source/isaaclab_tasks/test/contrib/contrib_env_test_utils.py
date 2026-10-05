@@ -32,6 +32,9 @@ from env_test_utils import setup_environment  # isort: skip
 Runtime = Literal["kitless", "kit", "kit_cameras"]
 
 _SKIPPED_TASKS = {
+    "IsaacContrib-Cake-Smash-Direct": (
+        "Requires an external layered cake USD and a single workcell; covered by test_cake_smash_native.py."
+    ),
     "IsaacContrib-AutoMate-Assembly-Direct": "Requires CUDA support outside the standard environment test runner.",
     "IsaacContrib-AutoMate-Disassembly-Direct": "Requires CUDA support outside the standard environment test runner.",
 }
