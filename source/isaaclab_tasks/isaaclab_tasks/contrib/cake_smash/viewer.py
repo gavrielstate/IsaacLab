@@ -40,6 +40,7 @@ class CakeViewer(ViewerRTX):
         self.lighting = lighting
         self.sampling_overrides = {}
         self.last_timings = {}
+        self._cpu_presentation = False
         self.stream = CakeGaussianStream(env, gaussian_asset)
         try:
             with wp.ScopedDevice(env.particle_positions.device):
@@ -67,6 +68,24 @@ class CakeViewer(ViewerRTX):
             # the stream has already registered its native frame callback.
             self.stream.close()
             raise
+
+    def _init_window(self):
+        try:
+            super()._init_window()
+        except RuntimeError as error:
+            if "Failed to register GL texture resource" not in str(error):
+                raise
+            # The native window was partially constructed before CUDA/GL
+            # registration failed. Replace only its image presentation path.
+            if self._window is not None:
+                self._window.close()
+                self._window = None
+            self._tex_resource = None
+            from .cpu_window import initialize  # noqa: PLC0415
+
+            initialize(self)
+            self._cpu_presentation = True
+            print("CUDA/OpenGL interop unavailable: using CPU image presentation; Newton and RTX remain on GPU.")
 
     def _init_ovrtx(self):
         self.stream.author(self.stage)
@@ -143,6 +162,12 @@ class CakeViewer(ViewerRTX):
             for frame in product.frames:
                 for variable in frame.render_vars.values():
                     if variable.source_name == "LdrColor":
+                        if self._cpu_presentation:
+                            from .cpu_window import present  # noqa: PLC0415
+
+                            with variable.map(device=Device.CPU) as mapping:
+                                present(self, np.from_dlpack(mapping))
+                            return
                         with variable.map(device=Device.CUDA) as mapping:
                             pixels = wp.from_dlpack(mapping, dtype=wp.vec4ub)
                             self._blit_to_window(pixels)

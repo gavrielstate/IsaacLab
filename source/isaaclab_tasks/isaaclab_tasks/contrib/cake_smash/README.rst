@@ -129,7 +129,7 @@ Run the live native viewer:
        --gaussian-asset /path/to/cake_live_ovrtx.usdc \
        --seconds 5 --width 960 --height 720 --video --verify-render --output /tmp/cake_render
 
-Open the native RTX viewer on an NVIDIA-backed graphics desktop:
+Open the native RTX viewer from a graphics desktop:
 
 .. code-block:: bash
 
@@ -143,9 +143,13 @@ button restarts physics and clears renderer history. H hides/shows the native
 panels, and native mouse controls orbit or zoom the camera. The final state
 remains available after ``--seconds`` until reset or window closure. Window
 mode needs no output directory. Use the headless command separately for video
-and array verification. Native CUDA/OpenGL interop requires an NVIDIA graphics
-context on the simulation GPU; software Xvfb/llvmpipe displays cannot present
-GPU frames. Window performance is separate from headless measurements.
+and array verification. Direct CUDA/OpenGL presentation uses an NVIDIA graphics
+context on the simulation GPU. If texture registration is unavailable (for
+example, a software Xvfb/llvmpipe display), the task automatically presents the
+finished RTX color image through CPU upload in a pyglet window, retaining
+Newton's native GUI/camera controls. Physics, skinning and RTX rendering remain
+on GPU. This presentation fallback copies only the finished RGBA image and adds
+display cost. Window performance is separate from headless measurements.
 
 ``--physics-hz`` selects 30, 60, 90 or 120 Hz, and ``--render-fps`` selects
 15 or 30 frames/s. The default is 120 Hz physics with 30 frames/s rendering;
