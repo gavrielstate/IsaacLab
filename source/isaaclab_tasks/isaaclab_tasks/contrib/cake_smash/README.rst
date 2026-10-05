@@ -129,6 +129,24 @@ Run the live native viewer:
        --gaussian-asset /path/to/cake_live_ovrtx.usdc \
        --seconds 5 --width 960 --height 720 --video --verify-render --output /tmp/cake_render
 
+Open the native RTX viewer on an NVIDIA-backed graphics desktop:
+
+.. code-block:: bash
+
+   uv run --no-sync python -m isaaclab_tasks.contrib.cake_smash.render_demo \
+       --physics-asset /path/to/reference.usda \
+       --gaussian-asset /path/to/cake_live_ovrtx.usdc \
+       --window --paused --lighting front --offset 0.09 0.02
+
+Space toggles pause, period steps one display frame, and the native Reset
+button restarts physics and clears renderer history. H hides/shows the native
+panels, and native mouse controls orbit or zoom the camera. The final state
+remains available after ``--seconds`` until reset or window closure. Window
+mode needs no output directory. Use the headless command separately for video
+and array verification. Native CUDA/OpenGL interop requires an NVIDIA graphics
+context on the simulation GPU; software Xvfb/llvmpipe displays cannot present
+GPU frames. Window performance is separate from headless measurements.
+
 ``--physics-hz`` selects 30, 60, 90 or 120 Hz, and ``--render-fps`` selects
 15 or 30 frames/s. The default is 120 Hz physics with 30 frames/s rendering;
 changing the display rate does not lower physics frequency. ``--async-render``

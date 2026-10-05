@@ -94,6 +94,8 @@ class CakeViewer(ViewerRTX):
         self.stream.update(self._rtx, self.prepared)
         published = time.perf_counter()
         super()._render_and_display()
+        if not self._async:
+            self._present_frame()
         self.last_timings["publication_seconds"] = published - started
         self.last_timings["ovrtx_render_seconds"] = time.perf_counter() - published
 
@@ -124,7 +126,29 @@ class CakeViewer(ViewerRTX):
         started = time.perf_counter()
         self._render_products = self._render_result.wait().fetch()
         self._render_result = None
+        self._present_frame()
         return time.perf_counter() - started
+
+    def _present_frame(self) -> None:
+        """Present OVRTX 0.6 output with the native GPU/OpenGL blitter.
+
+        Its output keys are prim paths. Find LdrColor by semantic source name;
+        the stock viewer's older literal-key lookup misses these frames.
+        """
+        if self._window is None or self._window.context is None or self._should_close:
+            return
+        from ovrtx import Device  # noqa: PLC0415
+
+        for product in (self._render_products or {}).values():
+            for frame in product.frames:
+                for variable in frame.render_vars.values():
+                    if variable.source_name == "LdrColor":
+                        with variable.map(device=Device.CUDA) as mapping:
+                            pixels = wp.from_dlpack(mapping, dtype=wp.vec4ub)
+                            self._blit_to_window(pixels)
+                            mapping.unmap(stream=pixels.device.stream.cuda_stream)
+                        return
+        raise RuntimeError("No completed OVRTX LdrColor output for window presentation.")
 
     def capture_image(self) -> np.ndarray:
         """Read OVRTX 0.6 color output, whose keys are render-var prim paths."""

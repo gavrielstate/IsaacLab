@@ -26,6 +26,37 @@ from .cake_smash_env_cfg import CakeSmashEnvCfg
 from .viewer import CakeViewer
 
 
+def _run_window(env, viewer, action, args, frame_count):
+    """Use native viewer controls; retain the final state until reset or close."""
+    reset_requested = False
+    frame = 0
+
+    def request_reset():
+        nonlocal reset_requested
+        # GUI callbacks can execute during presentation. Reset between frames.
+        reset_requested = True
+
+    viewer.set_reset_callback(request_reset)
+    print("RTX viewer: Space pauses, period steps, Reset restarts. Close the window to exit.")
+    print(f"Physics stops after {args.seconds:g} seconds; the final state remains available for inspection.")
+    while viewer.is_running():
+        started = time.perf_counter()
+        if reset_requested:
+            viewer.finish_frame()
+            env.reset(seed=42)
+            viewer._rtx.reset(time=0.0)
+            frame = 0
+            reset_requested = False
+        if frame < frame_count and viewer.should_step():
+            env.step(action)
+            wp.synchronize_device(args.device)
+            frame += 1
+        viewer.draw(frame / args.render_fps)
+        viewer.finish_frame()
+        time.sleep(max(0.0, 1.0 / args.render_fps - (time.perf_counter() - started)))
+    viewer.set_reset_callback(None)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--physics-asset", required=True)
@@ -48,7 +79,9 @@ def main() -> None:
     parser.add_argument(
         "--async-render", action="store_true", help="Overlap native rendering with the next physics step."
     )
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path, help="Required for headless rendering; use a fresh directory.")
+    parser.add_argument("--window", action="store_true", help="Open the native RTX viewer and retain the final state.")
+    parser.add_argument("--paused", action="store_true", help="Start the interactive viewer paused.")
     parser.add_argument("--video", action="store_true")
     parser.add_argument(
         "--verify-render", action="store_true", help="Read back final native arrays outside loop timing."
@@ -60,11 +93,18 @@ def main() -> None:
     frame_count = round(args.seconds * args.render_fps)
     if frame_count <= 0 or args.iterations <= 0 or args.capacity <= 0:
         parser.error("At least one frame and positive iterations/capacity are required.")
-    if args.output.exists() and any(args.output.iterdir()):
+    if args.paused and not args.window:
+        parser.error("--paused requires --window.")
+    if args.window and (args.video or args.verify_render):
+        parser.error("Use headless rendering for --video and --verify-render.")
+    if args.output is None and not args.window:
+        parser.error("Headless rendering requires --output.")
+    if args.output is not None and args.output.exists() and any(args.output.iterdir()):
         parser.error("Choose a fresh output directory to preserve earlier results.")
     if args.video and (shutil.which("ffmpeg") is None or args.width % 2 or args.height % 2):
         parser.error("Video needs ffmpeg and even image dimensions.")
-    args.output.mkdir(parents=True, exist_ok=True)
+    if args.output is not None:
+        args.output.mkdir(parents=True, exist_ok=True)
     cfg = CakeSmashEnvCfg(
         physics_asset_path=args.physics_asset,
         episode_length_s=args.seconds + 1,
@@ -91,7 +131,8 @@ def main() -> None:
             args.async_render,
             antialiasing=args.antialiasing,
             lighting=args.lighting,
-            headless=True,
+            headless=not args.window,
+            paused=args.paused,
             width=args.width,
             height=args.height,
         )
@@ -137,6 +178,9 @@ def main() -> None:
         for _ in range(3):
             viewer.draw(0.0)
         viewer.finish_frame()
+        if args.window:
+            _run_window(env, viewer, action, args, frame_count)
+            return
         frame_times, capture_times = [], []
         phase_times = []
         for frame in range(frame_count):
