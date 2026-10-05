@@ -12,7 +12,8 @@ import warp as wp
 
 from pxr import Sdf, Usd, UsdGeom, UsdShade, Vt
 
-from ..physics.mpm.binding import make_binding
+from isaaclab_contrib.mpm_gaussians import GaussianArrayStream, make_binding
+
 from ..physics.mpm.rtx_gaussian_frame import GaussianLocalFrame
 from ..physics.mpm.rtx_sh_frame import SHMaterialFrame
 
@@ -22,7 +23,7 @@ class BerryGaussianStream:
 
     def __init__(self, berry, root_path, partitions, hide_interior):
         self.berry = berry
-        self._berry_bindings = {}
+        self._array_stream = None
         self.root_path = root_path
         self.path = f"{root_path}/Gaussians"
         visible = np.arange(len(self.berry.asset["xyz"]))
@@ -115,21 +116,11 @@ class BerryGaussianStream:
 
     def bind(self, rtx):
         self._rtx = rtx
-        from ovrtx import BindingFlag
-
         # Persistent bindings establish OVRTX's animated-geometry dataflow.
         # By-name writes can read back correctly while leaving its BVH stale.
-        self._berry_bindings = {
-            name: self._rtx.bind_array_attribute(
-                self.paths, name, dtype="float32", shape=(lanes,), flags=BindingFlag.OPTIMIZE
-            )
-            for name, lanes in (
-                ("positions", 3),
-                ("scales", 3),
-                ("orientations", 4),
-                ("primvars:squishyShQuaternion", 4),
-            )
-        }
+        self._array_stream = GaussianArrayStream(
+            rtx, self.paths, {"positions": 3, "scales": 3, "orientations": 4, "primvars:squishyShQuaternion": 4}
+        )
 
     def prepare(self, sh_rotation):
         with wp.ScopedDevice(self.berry.mpm_device):
@@ -156,8 +147,9 @@ class BerryGaussianStream:
             tensor=np.repeat(transform[None], len(self.paths), axis=0),
             semantic=Semantic.XFORM_MAT4x4,
         )
-        for name, value in values.items():
-            self._berry_bindings[name].write([np.ascontiguousarray(value[idx]) for idx in self.indices])
+        self._array_stream.write(
+            {name: [np.ascontiguousarray(value[idx]) for idx in self.indices] for name, value in values.items()}
+        )
 
     def verify(self, prepared):
         """Read back the native renderer's complete published Gaussian arrays."""
@@ -181,5 +173,5 @@ class BerryGaussianStream:
         return True
 
     def close(self):
-        for binding in self._berry_bindings.values():
-            binding.unbind()
+        if self._array_stream is not None:
+            self._array_stream.close()

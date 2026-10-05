@@ -59,9 +59,12 @@ The public 0.5 renderer, installed when `setup.sh` is run without a `--renderer-
 is rejected for this task because live Gaussian updates can become invisible despite
 correct array readback. Physics-only `--no_render` remains supported with the public
 runtime. For an existing authorized offline distribution, use
-`setup.sh --renderer-wheels DIR` with
-`ovrtx-0.6.0-py3-none-manylinux_2_35_x86_64.whl` and
-`ovstage-0.3.0.0-py3-none-manylinux_2_35_x86_64.whl` in that directory.
+`setup.sh --renderer-wheels DIR`. The directory must contain exactly one
+`ovrtx-0.6.*-py3-none-manylinux_2_35_x86_64.whl` and exactly one
+`ovstage-0.3.*-py3-none-manylinux_2_35_x86_64.whl`. Release and build-version
+filenames are accepted, including development versions with local build tags;
+missing or multiple matching wheels are rejected before installation. Runtime
+validation still checks that the installed renderer build supports live updates.
 
 `setup.sh` creates an isolated `.venv-tasks`; it does not modify `.venv-kitless` or global
 Python. It installs this branch's frozen environment (Newton, Warp and MuJoCo-Warp at the

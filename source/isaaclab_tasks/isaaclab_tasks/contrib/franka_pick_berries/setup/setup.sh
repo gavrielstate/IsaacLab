@@ -15,10 +15,23 @@ if [[ "${1:-}" == "--help" && $# == 1 ]]; then
 fi
 if [[ "${1:-}" == "--renderer-wheels" && $# == 2 ]]; then
     TASK_RENDERER_WHEELS="$(cd -- "$2" && pwd)"
-    TASK_OVRTX_WHEEL="$TASK_RENDERER_WHEELS/ovrtx-0.6.0-py3-none-manylinux_2_35_x86_64.whl"
-    TASK_OVSTAGE_WHEEL="$TASK_RENDERER_WHEELS/ovstage-0.3.0.0-py3-none-manylinux_2_35_x86_64.whl"
+    # Accept release and build-version wheel names, but never pick an arbitrary build.
+    shopt -s nullglob
+    TASK_OVRTX_WHEELS=("$TASK_RENDERER_WHEELS"/ovrtx-0.6.*-py3-none-manylinux_2_35_x86_64.whl)
+    TASK_OVSTAGE_WHEELS=("$TASK_RENDERER_WHEELS"/ovstage-0.3.*-py3-none-manylinux_2_35_x86_64.whl)
+    shopt -u nullglob
+    [[ ${#TASK_OVRTX_WHEELS[@]} == 1 ]] || {
+        echo "Expected exactly one OVRTX 0.6 Linux x86-64 wheel in $TASK_RENDERER_WHEELS; found ${#TASK_OVRTX_WHEELS[@]}." >&2
+        exit 1
+    }
+    [[ ${#TASK_OVSTAGE_WHEELS[@]} == 1 ]] || {
+        echo "Expected exactly one OVStage 0.3 Linux x86-64 wheel in $TASK_RENDERER_WHEELS; found ${#TASK_OVSTAGE_WHEELS[@]}." >&2
+        exit 1
+    }
+    TASK_OVRTX_WHEEL="${TASK_OVRTX_WHEELS[0]}"
+    TASK_OVSTAGE_WHEEL="${TASK_OVSTAGE_WHEELS[0]}"
     [[ -f "$TASK_OVRTX_WHEEL" && -f "$TASK_OVSTAGE_WHEEL" ]] || {
-        echo "Missing validated OVRTX 0.6 / OVStage 0.3 Linux wheels in $TASK_RENDERER_WHEELS" >&2
+        echo "Renderer wheel paths must be regular files in $TASK_RENDERER_WHEELS." >&2
         exit 1
     }
 elif [[ "${1:-}" == "--renderer-internal" && $# == 1 ]]; then
