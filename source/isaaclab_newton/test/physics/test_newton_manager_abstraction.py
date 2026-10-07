@@ -1590,12 +1590,24 @@ def test_stateful_actuator_graph_matches_eager_across_decimation_changes(monkeyp
             monkeypatch.setattr(newton_manager_module, "has_kit", lambda: True)
             monkeypatch.setattr(sim, "_has_offscreen_render", True)
             NewtonManager.activate_newton_actuator_path()
+            tick_counter = wp.zeros(1, dtype=wp.int32, device="cuda:0")
+            step_counter = wp.zeros(1, dtype=wp.int32, device="cuda:0")
+            NewtonManager.register_post_physics_step_callback(
+                lambda: wp.launch(_count_physics_steps, 1, inputs=[tick_counter])
+            )
+            NewtonManager.register_post_step_callback(lambda: wp.launch(_count_physics_steps, 1, inputs=[step_counter]))
+            total_ticks = 0
+            total_steps = 0
             samples = []
             for decimation in (1, 2, 3):
                 NewtonManager.set_decimation(decimation)
                 for target in (1.0, -2.0, 3.0, 0.0):
                     NewtonManager.get_control().joint_target_q.fill_(target)
                     sim.step(render=False)
+                    total_ticks += decimation
+                    total_steps += 1
+                    assert tick_counter.numpy()[0] == total_ticks
+                    assert step_counter.numpy()[0] == total_steps
                     samples.append(
                         np.concatenate(
                             (

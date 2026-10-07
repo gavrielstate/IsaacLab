@@ -520,6 +520,7 @@ class NewtonManager(PhysicsManager):
     # their backend-to-user state republish kernels here so the reorders are
     # recorded into every captured graph.
     _post_step_callbacks: list[Callable[[], None]] = []
+    _post_physics_step_callbacks: list[Callable[[], None]] = []
 
     # CUDA graphing
     _graph = None
@@ -826,6 +827,7 @@ class NewtonManager(PhysicsManager):
         NewtonManager._post_actuator_callbacks = []
         NewtonManager._state_force_callbacks = []
         NewtonManager._post_step_callbacks = []
+        NewtonManager._post_physics_step_callbacks = []
         # Set by an articulation that took the ``use_newton_actuators=True``
         # branch in ``_process_actuators_cfg``.  Together with the adapter
         # check, this gates whether the decimation loop can be captured into
@@ -1738,6 +1740,8 @@ class NewtonManager(PhysicsManager):
                 cb()
 
             cls._run_solver_substeps(contacts)
+            for cb in cls._post_physics_step_callbacks:
+                cb()
 
         for cb in cls._post_step_callbacks:
             cb()
@@ -1757,6 +1761,8 @@ class NewtonManager(PhysicsManager):
             contacts = None
 
         cls._run_solver_substeps(contacts)
+        for cb in cls._post_physics_step_callbacks:
+            cb()
         for cb in cls._post_step_callbacks:
             cb()
         cls._update_sensors(contacts)
@@ -1921,6 +1927,25 @@ class NewtonManager(PhysicsManager):
         if callback in NewtonManager._state_force_callbacks:
             return
         NewtonManager._state_force_callbacks.append(callback)
+
+    @classmethod
+    def register_post_physics_step_callback(cls, callback: Callable[[], None]) -> None:
+        """Register a graph-safe hook after each physics tick's solver substeps.
+
+        Runs once per decimation iteration, before the once-per-manager-step
+        hooks and sensor updates. Register before CUDA graph capture. This is
+        suitable for integrating material frames using the simulation timestep.
+        """
+        if cls.has_captured_cuda_graph():
+            raise RuntimeError("Register physics-tick callbacks before CUDA graph capture.")
+        if callback not in NewtonManager._post_physics_step_callbacks:
+            NewtonManager._post_physics_step_callbacks.append(callback)
+
+    @classmethod
+    def unregister_post_physics_step_callback(cls, callback: Callable[[], None]) -> None:
+        """Remove a physics-tick callback; an absent callback is a safe no-op."""
+        with contextlib.suppress(ValueError):
+            NewtonManager._post_physics_step_callbacks.remove(callback)
 
     @classmethod
     def register_post_step_callback(cls, callback: Callable[[], None]) -> None:

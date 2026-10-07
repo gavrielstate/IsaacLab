@@ -32,6 +32,8 @@ class CakeSmashEnvCfg(DirectRLEnvCfg):
 
     physics_asset_path: str = os.environ.get("ISAACLAB_CAKE_PHYSICS_USD_PATH", MISSING)
     gaussian_asset_path: str | None = os.environ.get("ISAACLAB_CAKE_GAUSSIAN_USD_PATH")
+    cake_position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    """Translate physical and Gaussian cake samples together [m]."""
     render_samples: int = 1
     """Requested OVRTX RTPT samples per pixel; override with env.render_samples."""
     cherry_mass: float = 2.0

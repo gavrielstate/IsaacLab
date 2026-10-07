@@ -1,0 +1,110 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Standard Lab cake task with experimental fracture-driven material fields."""
+
+import numpy as np
+from isaaclab_newton.physics import NewtonManager
+
+from pxr import Usd, UsdGeom
+
+from isaaclab.utils import configclass
+
+from ..cake_smash.cake_smash_env import CakeSmashEnv
+from ..cake_smash.cake_smash_env_cfg import CakeSmashEnvCfg
+from .gaussian_binding import FractureGaussianStream
+from .solver import CakeFractureSolverCfg, SolverCakeFracture
+
+
+@configclass
+class CakeFractureEnvCfg(CakeSmashEnvCfg):
+    bond_strength: float = 400.0
+    bond_peak: float = 0.001
+    bond_final: float = 0.004
+    fracture_fields: int = 0
+    """Zero reserves one slot per particle; contact work uses only active fragments."""
+    compression_pressure: float = 1500.0
+    compression_hardening: float = 10000.0
+    explicit_substep_rate: int = 4800
+
+    def __post_init__(self):
+        super().__post_init__()
+        viz = self.sim.default_visualizer_cfg
+        viz.eye = (0.52, -0.68, 0.58)
+        viz.lookat = (0.0, 0.0, 0.31)
+        viz.focal_length = 17.0
+        viz.window_width = 1280
+        viz.window_height = 960
+        viz.show_static = True
+        viz.rtx_environment = "studio"
+        viz.enable_sky = False
+        viz.background_color = (0.12, 0.14, 0.17)
+
+    def configure_solver(self):
+        stage = Usd.Stage.Open(self.physics_asset_path)
+        tray = UsdGeom.Cylinder(stage.GetPrimAtPath("/World/Stand/TrayCollider"))
+        center = UsdGeom.Xformable(tray).ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()
+        radius = float(tray.GetRadiusAttr().Get())
+        half_height = 0.5 * float(tray.GetHeightAttr().Get())
+        lower = min(
+            float(
+                np.min(
+                    np.asarray(UsdGeom.Points(prim).GetPointsAttr().Get())[:, 2]
+                    - 0.5 * np.cbrt(4.0 / 3.0 * np.pi) * 0.5 * np.asarray(UsdGeom.Points(prim).GetWidthsAttr().Get())
+                )
+            )
+            for prim in stage.GetPrimAtPath("/World/Cake").GetChildren()
+            if prim.IsA(UsdGeom.Points)
+        )
+        # Author a nonpenetrating rest pose instead of damaging bonds through
+        # a first-step collision projection of the copied asset.
+        x, y, z = self.cake_position_offset
+        self.cake_position_offset = (x, y, z + max(float(center[2]) + half_height - lower - z, 0.0))
+        cherry = UsdGeom.Sphere(stage.GetPrimAtPath("/World/Cherry/Collider"))
+        self.sim.physics.solver_cfg.entries[1].solver_cfg = CakeFractureSolverCfg(
+            solver_config=SolverCakeFracture.Config(
+                grid_origin=(-0.52, -0.52, -0.104),
+                grid_resolution=(41, 41, 31),
+                grid_spacing=0.026,
+                max_active_nodes=8192,
+                fields=self.fracture_fields,
+                substep_rate=self.explicit_substep_rate,
+                coupling_rate=120,
+                ground_height=0.0,
+                ground_friction=0.35,
+                field_friction=0.25,
+                # Finite cylindrical pedestal: unlike the diagnostic's infinite shelf,
+                # debris beyond its rim can fall to the floor.
+                vessels=((*tuple(center), 0.0, radius, half_height),),
+                softening=0.0,
+                bruise_rate=0.0,
+                adhesion_strength=0.0,
+                bond_strength=self.bond_strength,
+                bond_peak=self.bond_peak,
+                bond_final=self.bond_final,
+                cherry_mass=self.cherry_mass,
+                cherry_radius=float(cherry.GetRadiusAttr().Get()),
+                compression_pressure=self.compression_pressure,
+                compression_hardening=self.compression_hardening,
+            )
+        )
+
+
+class CakeFractureEnv(CakeSmashEnv):
+    def __init__(self, cfg, render_mode=None, **kwargs):
+        cfg.configure_solver()
+        super().__init__(cfg, render_mode=render_mode, **kwargs)
+
+    def _create_gaussian_stream(self, asset_path):
+        return FractureGaussianStream(self, asset_path, position_offset=self.cfg.cake_position_offset)
+
+    def _reset_solver(self):
+        NewtonManager.get_solver().reset(NewtonManager.get_state_0(), world_mask=None, flags=None)
+
+    def _pre_physics_step(self, actions):
+        super()._pre_physics_step(actions)
+        solver = NewtonManager.get_solver().solver("cake")
+        solver.update_fields()
+        solver.check()

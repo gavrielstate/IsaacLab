@@ -18,7 +18,7 @@ from isaaclab_newton.assets import MPMObjectCfg
 from isaaclab_newton.physics import NewtonManager, NewtonMPMManager
 from isaaclab_visualizers.newton import NewtonRTXVisualizerCfg
 
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, Vt
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
@@ -60,12 +60,14 @@ def _prepare_asset(cfg: CakeSmashEnvCfg, output: Path) -> tuple[list[str], tuple
     for prim in components:
         names.append(prim.GetName())
         points = np.asarray(UsdGeom.Points(prim).GetPointsAttr().Get())
+        points = points + np.asarray(cfg.cake_position_offset, np.float32)
         top = max(top, float(points[:, 2].max()))
         root = f"/World/CakeLayers/{prim.GetName()}"
         UsdGeom.Xform.Define(stage, root)
         UsdGeom.Scope.Define(stage, root + "/geometry")
         Sdf.CopySpec(stage.GetRootLayer(), prim.GetPath(), stage.GetRootLayer(), root + "/geometry/points")
         copied = stage.GetPrimAtPath(root + "/geometry/points")
+        UsdGeom.Points(copied).GetPointsAttr().Set(Vt.Vec3fArray.FromNumpy(points))
         copied.CreateRelationship("physics:simulationOwner").SetTargets([Sdf.Path("/World/PhysicsScene")])
         UsdGeom.Imageable(copied).MakeInvisible()
     cake.SetActive(False)
@@ -85,7 +87,7 @@ def _prepare_asset(cfg: CakeSmashEnvCfg, output: Path) -> tuple[list[str], tuple
     # rather than the highest interior particle center.
     authored_pos = UsdGeom.Xformable(cherry).GetLocalTransformation().ExtractTranslation()
     original_gap = stage.GetPrimAtPath("/World").GetAttribute("cake:dropGap").Get()
-    top = float(authored_pos[2]) - radius - float(original_gap)
+    top = float(authored_pos[2]) - radius - float(original_gap) + cfg.cake_position_offset[2]
     height = top + cfg.drop_gap + radius if cfg.drop_height is None else cfg.drop_height
     pos = (cfg.drop_offset[0], cfg.drop_offset[1], height)
     if cfg.gravity_only:
@@ -164,14 +166,20 @@ class CakeSmashEnv(DirectRLEnv):
                     raise ValueError("Cake Gaussian publication supports one RTX visualizer.")
                 if cfg.gaussian_asset_path is None:
                     raise ValueError("Set gaussian_asset_path or ISAACLAB_CAKE_GAUSSIAN_USD_PATH for newton_rtx.")
-                from .gaussian_stream import CakeGaussianStream
-
-                self.gaussian_stream = CakeGaussianStream(self, cfg.gaussian_asset_path)
+                self.gaussian_stream = self._create_gaussian_stream(cfg.gaussian_asset_path)
                 self._gaussian_visualizers[0].add_scene_stream(self.gaussian_stream)
                 self._gaussian_visualizers[0].register_ui_callback(self._render_drop_controls, position="panel")
             except Exception:
                 self.close()
                 raise
+
+    def _create_gaussian_stream(self, asset_path):
+        from .gaussian_stream import CakeGaussianStream
+
+        return CakeGaussianStream(self, asset_path, position_offset=self.cfg.cake_position_offset)
+
+    def _reset_solver(self):
+        NewtonMPMManager.reset_solver_state(world_mask=None)
 
     @property
     def particle_positions(self) -> wp.array:
@@ -274,7 +282,7 @@ class CakeSmashEnv(DirectRLEnv):
         super()._reset_idx(env_ids)
         # The coupled solver reset restores rigid state as well as MPM state.
         # Apply the user-selected cherry pose after that restoration.
-        NewtonMPMManager.reset_solver_state(world_mask=None)
+        self._reset_solver()
         if self.gaussian_stream is not None:
             self.gaussian_stream.invalidate()
         pose = self.cherry.data.default_root_pose.torch[env_ids].clone()

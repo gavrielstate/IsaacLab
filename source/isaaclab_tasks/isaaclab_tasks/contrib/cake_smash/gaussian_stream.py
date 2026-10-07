@@ -20,13 +20,12 @@ from isaaclab_contrib.mpm_gaussians import Binding, GaussianArrayStream, Gaussia
 class CakeGaussianStream:
     """Consume native Newton material frames with Nicolas' Gaussian binding.
 
-    Construct before stepping the environment. This task has no actuators and
-    exactly one MPM substep per Newton manager step, so its post-step callback
-    integrates display frames at the actual MPM rate. Folded robot decimation
-    needs a different scheduling hook and is deliberately rejected here.
+    Construct before stepping the environment. A physics-tick callback
+    integrates display frames at the actual MPM rate, including when robot
+    actuator stepping folds several physics ticks into one manager step.
     """
 
-    def __init__(self, env, asset_path: str):
+    def __init__(self, env, asset_path: str, position_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)):
         self.env = env
         self._array_stream = None
         self._renderer = None
@@ -35,8 +34,8 @@ class CakeGaussianStream:
         if env.common_step_counter != 0 or NewtonManager.has_captured_cuda_graph():
             raise ValueError("Construct the cake Gaussian stream before advancing physics.")
         cfg = env.cfg.sim.physics
-        if NewtonManager.handles_decimation() or cfg.num_substeps != 1:
-            raise ValueError("Cake display frames require one MPM substep per manager step, without folded decimation.")
+        if cfg.num_substeps != 1:
+            raise ValueError("Cake display frames require one MPM substep per physics tick.")
         entry = next(entry for entry in cfg.solver_cfg.entries if entry.name == "cake")
         if entry.substeps != 1:
             raise ValueError("Cake display frames require exactly one MPM entry substep.")
@@ -50,6 +49,7 @@ class CakeGaussianStream:
             key: np.asarray(prim.GetAttribute(attribute).Get(), np.float32).copy()
             for key, attribute in (("xyz", "positions"), ("scales", "scales"), ("rotations", "orientations"))
         }
+        self.asset["xyz"] += np.asarray(position_offset, np.float32)
         model = NewtonManager.get_model()
         rest = model.particle_q.numpy()
         physical_regions = np.full(len(rest), -1, np.int32)
@@ -78,10 +78,17 @@ class CakeGaussianStream:
         self.state = coupled.entry_state("cake")
         self.path = "/World/CakeGaussians"
         with wp.ScopedDevice(model.device):
-            self.binding = Binding(self.asset, rest, physical_regions)
+            self.binding = self.create_binding(rest, physical_regions)
             self.frame = GaussianLocalFrame(self.asset["xyz"], self.asset["scales"], model.device)
-            self.binding.deform_gpu(env.particle_positions, self.state.mpm.particle_transform, host=False)
-        NewtonManager.register_post_step_callback(self.advance_frames)
+            self.binding.deform_gpu(env.particle_positions, self.deformation_frames, host=False)
+        NewtonManager.register_post_physics_step_callback(self.advance_frames)
+
+    @property
+    def deformation_frames(self):
+        return self.state.mpm.particle_transform
+
+    def create_binding(self, rest, physical_regions):
+        return Binding(self.asset, rest, physical_regions)
 
     def advance_frames(self) -> None:
         """Integrate native display frames at each MPM tick; leave dynamics alone."""
@@ -96,7 +103,7 @@ class CakeGaussianStream:
         prim = stage.GetPrimAtPath(self.path)
         for name in ("positions", "scales", "orientations"):
             attr = prim.GetAttribute(name)
-            value = attr.Get()
+            value = Vt.Vec3fArray.FromNumpy(self.asset["xyz"]) if name == "positions" else attr.Get()
             attr.Set(value, 0)
             attr.Set(value, 1)
         xyz, scales = self.asset["xyz"], self.asset["scales"]
@@ -112,7 +119,7 @@ class CakeGaussianStream:
     def prepare(self):
         with wp.ScopedDevice(self.env.particle_positions.device):
             xyz, scales, rotations = self.binding.deform_gpu(
-                self.env.particle_positions, self.state.mpm.particle_transform, host=False
+                self.env.particle_positions, self.deformation_frames, host=False
             )
             xyz, scales, transform = self.frame.evaluate(xyz, scales)
         return transform, {"positions": [xyz], "scales": [scales], "orientations": [rotations]}
@@ -166,4 +173,4 @@ class CakeGaussianStream:
 
     def close(self) -> None:
         self.release_renderer()
-        NewtonManager.unregister_post_step_callback(self.advance_frames)
+        NewtonManager.unregister_post_physics_step_callback(self.advance_frames)
