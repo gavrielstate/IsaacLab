@@ -546,6 +546,7 @@ def grid_update(
     gravity: wp.vec3,
     damping: float,
     field_friction: float,
+    contact_broadphase: bool,
     ground: float,
     ground_friction: float,
     vessel_center: wp.array[wp.vec3],
@@ -567,12 +568,20 @@ def grid_update(
         return
     n = active[tid]
     fields = field_count[n]
-    for a in range(fields):
-        for b in range(a + 1, fields):
-            if field_ids[n, b] < field_ids[n, a]:
-                saved = field_ids[n, a]
-                field_ids[n, a] = field_ids[n, b]
-                field_ids[n, b] = saved
+    # Ascending IDs preserve the sequential contact projection order. Shell
+    # insertion avoids a full quadratic swap loop on fragmented nodes.
+    stride = fields // 2
+    while stride > 0:
+        for a in range(stride, fields):
+            saved = field_ids[n, a]
+            b = a
+            while b >= stride:
+                if field_ids[n, b - stride] <= saved:
+                    break
+                field_ids[n, b] = field_ids[n, b - stride]
+                b -= stride
+            field_ids[n, b] = saved
+        stride //= 2
     nodes = resolution[0] * resolution[1] * resolution[2]
     x = node_position(n, origin, resolution, spacing)
     for f in range(fields):
@@ -591,6 +600,15 @@ def grid_update(
                 k = field_ids[n, g] * nodes + n
                 if node_mass[k] <= 1.0e-14:
                     continue
+                relative = node_velocity[k] - node_velocity[i]
+                if contact_broadphase:
+                    separated = False
+                    for axis in range(3):
+                        gap_axis = wp.max(lower[k, axis] - upper[i, axis], lower[i, axis] - upper[k, axis])
+                        if gap_axis > wp.abs(relative[axis]) * dt + 0.00005:
+                            separated = True
+                    if separated:
+                        continue
                 normal = mass_gradient[i] / node_mass[i] - mass_gradient[k] / node_mass[k]
                 offset = mass_moment[k] / node_mass[k] - mass_moment[i] / node_mass[i]
                 if wp.length_sq(normal) < 1.0e-10:
@@ -866,6 +884,8 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
         """Rate at which the coupler steps the solver [Hz]; it must divide :attr:`substep_rate`."""
         damping: float = 1.0
         """Exponential velocity damping rate [1/s]."""
+        contact_broadphase: bool = False
+        """Reject AABB pairs unable to overlap under their node velocities this substep."""
         field_friction: float = 0.4
         """Coulomb friction between fields."""
         ground_height: float = 0.0
@@ -1178,6 +1198,7 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
                         self.gravity,
                         config.damping,
                         config.field_friction,
+                        config.contact_broadphase,
                         *vessels,
                         self.node_mass,
                         self.node_momentum,

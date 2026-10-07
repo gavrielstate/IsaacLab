@@ -20,6 +20,16 @@ from .solver import CakeFractureSolverCfg, SolverCakeFracture
 
 @configclass
 class CakeFractureEnvCfg(CakeSmashEnvCfg):
+    contact_broadphase: bool = False
+    """Reject disjoint swept particle-extent boxes before field contact."""
+    bond_graph: str = "nearest"
+    """Rest-neighbor sampling: nearest or signed-axis directional."""
+    bond_neighbors: int = 8
+    crush_start: float = 0.0
+    """Plastic log-volume collapse at onset of sponge cohesive damage."""
+    crush_final: float = 0.0
+    """Plastic log-volume collapse at complete damage; zero disables."""
+    grain_threshold: int = 6
     bond_strength: float = 400.0
     bond_peak: float = 0.001
     bond_final: float = 0.004
@@ -75,12 +85,18 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
                 ground_height=0.0,
                 ground_friction=0.35,
                 field_friction=0.25,
+                contact_broadphase=self.contact_broadphase,
                 # Finite cylindrical pedestal: unlike the diagnostic's infinite shelf,
                 # debris beyond its rim can fall to the floor.
                 vessels=((*tuple(center), 0.0, radius, half_height),),
                 softening=0.0,
                 bruise_rate=0.0,
                 adhesion_strength=0.0,
+                crush_start=self.crush_start,
+                crush_final=self.crush_final,
+                bond_graph=self.bond_graph,
+                neighbor_count=self.bond_neighbors,
+                grain_threshold=self.grain_threshold,
                 bond_strength=self.bond_strength,
                 bond_peak=self.bond_peak,
                 bond_final=self.bond_final,

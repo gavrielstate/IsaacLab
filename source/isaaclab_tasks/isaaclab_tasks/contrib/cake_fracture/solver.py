@@ -24,6 +24,30 @@ from isaaclab.utils import configclass
 from .explicit_mpm import SolverExplicitMultiFieldMPM, deformation_increment
 
 
+def rest_bond_pairs(rest: np.ndarray, neighbor_count: int, graph: str) -> np.ndarray:
+    """Build undirected local bonds; directional sampling avoids layer bias.
+
+    Directional mode selects the two closest candidates in each signed dominant
+    Cartesian direction. The fracture law and total incident area are unchanged.
+    Axes belong to the authored rest frame, so subsequent rigid motion cannot
+    change the graph. This is a sampling experiment, not a calibrated quadrature.
+    """
+    if graph not in ("nearest", "directional"):
+        raise ValueError(f"Unknown rest graph: {graph}")
+    candidates = neighbor_count if graph == "nearest" else max(32, neighbor_count)
+    candidates = min(candidates, len(rest) - 1)
+    _, neighbors = cKDTree(rest).query(rest, k=candidates + 1)
+    edges = []
+    for i, row in enumerate(neighbors[:, 1:]):
+        if graph == "directional":
+            delta = rest[row] - rest[i]
+            axes = np.argmax(np.abs(delta), axis=1)
+            sectors = 2 * axes + (delta[np.arange(len(row)), axes] > 0)
+            row = np.concatenate([row[sectors == sector][:2] for sector in range(6)])
+        edges.extend((i, int(j)) for j in row)
+    return np.unique(np.sort(np.asarray(edges, dtype=np.int32), axis=1), axis=0)
+
+
 @wp.kernel
 def bonds_step(
     pairs: wp.array[wp.vec2i],
@@ -34,6 +58,10 @@ def bonds_step(
     final: float,
     dt: float,
     grid: float,
+    crush_start: float,
+    crush_final: float,
+    young: wp.array[float],
+    compaction: wp.array[float],
     q: wp.array[wp.vec3],
     mass: wp.array[float],
     frames: wp.array[wp.mat33],
@@ -58,7 +86,17 @@ def bonds_step(
         d = 1.0
     elif maximum > peak:
         d = final * (maximum - peak) / (maximum * (final - peak))
-    damage[b] = d
+    # Permanent pore collapse can destroy sponge cohesion even while the
+    # bond is compressed. Cream/frosting retain their original traction law.
+    if crush_final > crush_start and crush_final > 0.0:
+        crushed = float(0.0)
+        if young[i] > 100000.0:
+            crushed = wp.max(crushed, compaction[i])
+        if young[j] > 100000.0:
+            crushed = wp.max(crushed, compaction[j])
+        d = wp.max(d, wp.clamp((crushed - crush_start) / (crush_final - crush_start), 0.0, 1.0))
+    damage[b] = wp.max(damage[b], d)
+    d = damage[b]
     force = (1.0 - d) * strength / peak * area[b] * (opening * normal + tangent)
     wp.atomic_add(v, i, dt / mass[i] * force)
     wp.atomic_add(v, j, -dt / mass[j] * force)
@@ -186,7 +224,11 @@ def plastic_compaction(
 
 @wp.kernel
 def grain_skin_frames(
-    frames: wp.array[wp.mat33], sizes: wp.array[int], compaction: wp.array[float], skin_frames: wp.array[wp.mat33]
+    frames: wp.array[wp.mat33],
+    sizes: wp.array[int],
+    compaction: wp.array[float],
+    threshold: int,
+    skin_frames: wp.array[wp.mat33],
 ):
     """Unresolved small grains retain their rest shape, rotation, and pore volume.
 
@@ -196,7 +238,7 @@ def grain_skin_frames(
     """
     i = wp.tid()
     f = frames[i]
-    if sizes[i] <= 6:
+    if sizes[i] <= threshold:
         u, s, v = wp.svd3(f)
         f = wp.exp(-compaction[i] / 3.0) * u @ wp.transpose(v)
     skin_frames[i] = f
@@ -220,6 +262,9 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         cherry_radius: float = 0.077
         cherry_mass: float = 2.0
         neighbor_count: int = 8
+        bond_graph: str = "nearest"
+        crush_start: float = 0.0
+        crush_final: float = 0.0
         grain_threshold: int = 6
         compression_pressure: float = 1500.0
         compression_hardening: float = 10000.0
@@ -229,16 +274,19 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
             config.fields = model.particle_count
         if not 0.0 < config.bond_peak < config.bond_final or config.bond_strength <= 0.0:
             raise ValueError("Require positive cohesive strength and 0 < peak < final separation")
+        if config.neighbor_count < 1 or config.grain_threshold < 0:
+            raise ValueError("Require positive neighbor count and nonnegative grain threshold")
+        if (config.crush_start != 0.0 or config.crush_final != 0.0) and not (
+            0.0 <= config.crush_start < config.crush_final
+        ):
+            raise ValueError("Require 0 <= crush start < final, or both zero to disable crush damage")
         super().__init__(model, config)
         bodies = [i for i, name in enumerate(model.body_label) if name.endswith("/Cherry")]
         if len(bodies) != 1:
             raise ValueError(f"Expected exactly one cherry proxy, got {model.body_label}")
         self.cherry_body = bodies[0]
         rest = model.particle_q.numpy()
-        distances, neighbors = cKDTree(rest).query(rest, k=config.neighbor_count + 1)
-        pairs = np.unique(
-            np.sort(np.array([(i, j) for i, row in enumerate(neighbors[:, 1:]) for j in row], np.int32), axis=1), axis=0
-        )
+        pairs = rest_bond_pairs(rest, config.neighbor_count, config.bond_graph)
         # Each pair receives its share of a particle's represented surface area.
         degree = np.bincount(pairs.ravel(), minlength=len(rest))
         spacing = self.spacing.numpy()
@@ -325,6 +373,10 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
                     cfg.bond_final,
                     h,
                     cfg.grid_spacing,
+                    cfg.crush_start,
+                    cfg.crush_final,
+                    self.model.mpm.young_modulus,
+                    self.plastic_log_volume,
                     state_in.particle_q,
                     self.model.particle_mass,
                     self.elastic,
@@ -397,7 +449,7 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         wp.launch(
             grain_skin_frames,
             dim=self.model.particle_count,
-            inputs=[self.frames, self.fragment_sizes, self.plastic_log_volume, self.skin_frames],
+            inputs=[self.frames, self.fragment_sizes, self.plastic_log_volume, cfg.grain_threshold, self.skin_frames],
             device=self.model.device,
         )
 
