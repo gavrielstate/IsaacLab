@@ -85,6 +85,7 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
                 ground_height=0.0,
                 ground_friction=0.35,
                 field_friction=0.25,
+                contact_block_dim=1,
                 contact_broadphase=self.contact_broadphase,
                 # Finite cylindrical pedestal: unlike the diagnostic's infinite shelf,
                 # debris beyond its rim can fall to the floor.

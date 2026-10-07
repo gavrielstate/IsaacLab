@@ -5,3 +5,7 @@ visualizer. Preserve the existing cherry controls and manual episode reset.
 
 Expose optional directional rest-neighbor bonds, irreversible sponge-compaction
 damage and field-contact AABB rejection for material sampling experiments.
+
+Accelerate experimental cake fracture contact with node-major grid-field
+storage, cached per-field properties and small-grid CUDA scheduling. Preserve
+material settings, contact projection order and the 936-particle input.

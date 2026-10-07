@@ -385,7 +385,7 @@ def clear_grid(
     active: wp.array[int],
     count: wp.array[int],
     visited: wp.array[int],
-    nodes: int,
+    fields: int,
     field_count: wp.array[int],
     field_ids: wp.array2d[int],
     mass: wp.array[float],
@@ -401,7 +401,7 @@ def clear_grid(
         n = active[t]
         visited[n] = 0
         for slot in range(field_count[n]):
-            i = field_ids[n, slot] * nodes + n
+            i = n * fields + field_ids[n, slot]
             mass[i] = 0.0
             momentum[i] = wp.vec3(0.0)
             if mass_gradient.shape[0] > 1:
@@ -514,7 +514,7 @@ def particle_to_grid(
     wx, wy, wz = spline_weights(fx[0]), spline_weights(fx[1]), spline_weights(fx[2])
     weight = wx[a] * wy[b] * wz[k]
     delta = (wp.vec3(float(a), float(b), float(k)) - fx) * spacing
-    i = tissue_field[p] * (resolution[0] * resolution[1] * resolution[2]) + n
+    i = n * fields + tissue_field[p]
     added_mass = weight * mass[p]
     old_mass = wp.atomic_add(node_mass, i, added_mass)
     if old_mass == 0.0 and added_mass > 0.0:
@@ -582,10 +582,9 @@ def grid_update(
                 b -= stride
             field_ids[n, b] = saved
         stride //= 2
-    nodes = resolution[0] * resolution[1] * resolution[2]
     x = node_position(n, origin, resolution, spacing)
     for f in range(fields):
-        i = field_ids[n, f] * nodes + n
+        i = n * field_ids.shape[1] + field_ids[n, f]
         node_velocity[i] = wp.vec3(0.0)
         if node_mass[i] > 1.0e-14:
             node_velocity[i] = (node_momentum[i] / node_mass[i] + dt * gravity) * wp.exp(-damping * dt)
@@ -593,14 +592,19 @@ def grid_update(
     # momentum; separating fields move freely.
     for sweep in range(3):
         for f in range(fields):
-            i = field_ids[n, f] * nodes + n
-            if node_mass[i] <= 1.0e-14:
+            i = n * field_ids.shape[1] + field_ids[n, f]
+            mass_i = node_mass[i]
+            if mass_i <= 1.0e-14:
                 continue
+            gradient_i = mass_gradient[i] / mass_i
+            center_i = mass_moment[i] / mass_i
+            velocity_i = node_velocity[i]
             for g in range(f + 1, fields):
-                k = field_ids[n, g] * nodes + n
-                if node_mass[k] <= 1.0e-14:
+                k = n * field_ids.shape[1] + field_ids[n, g]
+                mass_k = node_mass[k]
+                if mass_k <= 1.0e-14:
                     continue
-                relative = node_velocity[k] - node_velocity[i]
+                relative = node_velocity[k] - velocity_i
                 if contact_broadphase:
                     separated = False
                     for axis in range(3):
@@ -609,14 +613,13 @@ def grid_update(
                             separated = True
                     if separated:
                         continue
-                normal = mass_gradient[i] / node_mass[i] - mass_gradient[k] / node_mass[k]
-                offset = mass_moment[k] / node_mass[k] - mass_moment[i] / node_mass[i]
+                normal = gradient_i - mass_gradient[k] / mass_k
+                offset = mass_moment[k] / mass_k - center_i
                 if wp.length_sq(normal) < 1.0e-10:
                     normal = offset
                 if wp.dot(normal, offset) < 0.0:
                     normal = -normal
                 normal = wp.normalize(normal)
-                relative = node_velocity[k] - node_velocity[i]
                 closing = wp.dot(relative, normal)
                 # Overlapping kernel support is not contact: estimate the gap from the fields' particle extents, with
                 # a 50 micrometer margin.
@@ -626,14 +629,15 @@ def grid_update(
                     near_k = wp.where(normal[axis] >= 0.0, lower[k, axis], upper[k, axis])
                     gap += normal[axis] * (near_k - near_i)
                 if closing < 0.0 and gap <= -closing * dt + 0.00005:
-                    reduced = node_mass[i] * node_mass[k] / (node_mass[i] + node_mass[k])
+                    reduced = mass_i * mass_k / (mass_i + mass_k)
                     tangent = relative - closing * normal
                     tangent *= wp.min(1.0, field_friction * (-closing) / wp.max(wp.length(tangent), 1.0e-12))
                     impulse = reduced * (closing * normal + tangent)
-                    node_velocity[i] += impulse / node_mass[i]
-                    node_velocity[k] -= impulse / node_mass[k]
+                    velocity_i += impulse / mass_i
+                    node_velocity[k] -= impulse / mass_k
+            node_velocity[i] = velocity_i
     for f in range(fields):
-        i = field_ids[n, f] * nodes + n
+        i = n * field_ids.shape[1] + field_ids[n, f]
         # Thin vessel bases can lie between nodes, so nodes within half a cell are supported too; particle projection
         # is exact.
         node_velocity[i] = static_boundaries(
@@ -654,6 +658,7 @@ def grid_update(
 def grid_to_particle(
     node_velocity: wp.array[wp.vec3],
     tissue_field: wp.array[int],
+    fields: int,
     fragment_sizes: wp.array[int],
     grain_threshold: int,
     interface: wp.array[int],
@@ -684,7 +689,7 @@ def grid_to_particle(
     base = wp.vec3i(int(wp.floor(q[0] - 0.5)), int(wp.floor(q[1] - 0.5)), int(wp.floor(q[2] - 0.5)))
     fx = q - wp.vec3(float(base[0]), float(base[1]), float(base[2]))
     wx, wy, wz = spline_weights(fx[0]), spline_weights(fx[1]), spline_weights(fx[2])
-    first = tissue_field[p] * (resolution[0] * resolution[1] * resolution[2])
+    first = tissue_field[p]
     velocity = wp.vec3(0.0)
     gradient = wp.mat33(0.0)
     for a in range(3):
@@ -697,7 +702,7 @@ def grid_to_particle(
                     continue
                 weight = wx[a] * wy[b] * wz[k]
                 delta = (wp.vec3(float(a), float(b), float(k)) - fx) * spacing
-                vg = node_velocity[first + node_index(node, resolution)]
+                vg = node_velocity[node_index(node, resolution) * fields + first]
                 velocity += weight * vg
                 gradient += 4.0 * weight / (spacing * spacing) * wp.outer(vg, delta)
 
@@ -884,6 +889,8 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
         """Rate at which the coupler steps the solver [Hz]; it must divide :attr:`substep_rate`."""
         damping: float = 1.0
         """Exponential velocity damping rate [1/s]."""
+        contact_block_dim: int = 256
+        """CUDA threads per contact block; small active grids can benefit from one node per block."""
         contact_broadphase: bool = False
         """Reject AABB pairs unable to overlap under their node velocities this substep."""
         field_friction: float = 0.4
@@ -921,6 +928,8 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
         super().__init__(model)
         if config.substep_rate % config.coupling_rate:
             raise ValueError("The coupling rate must divide the substep rate")
+        if config.contact_block_dim not in (1, 2, 4, 8, 16, 32, 64, 128, 256):
+            raise ValueError("Contact block dimension must be a power of two from 1 to 256")
         self.config = config
         device = model.device
         gravity = np.asarray(model.gravity.numpy(), np.float32).reshape(-1, 3)[0]
@@ -984,7 +993,7 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
             self.peak = wp.zeros(count, dtype=float)
             self.age = wp.zeros(count, dtype=float)
 
-            # Grid: one block of nodes per field.
+            # Node-major fields keep a node's sequential contact data adjacent.
             self.node_field_count = wp.zeros(nodes, dtype=int)
             self.node_field_ids = wp.zeros((nodes, fields), dtype=int)
             self.node_mass = wp.zeros(nodes * fields, dtype=float)
@@ -1065,7 +1074,7 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
                         self.active,
                         self.count,
                         self.visited,
-                        int(np.prod(config.grid_resolution)),
+                        config.fields,
                         self.node_field_count,
                         self.node_field_ids,
                     ],
@@ -1186,6 +1195,9 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
                 wp.launch(
                     grid_update,
                     dim=len(self.active),
+                    # Small blocks spread independent node contact work across
+                    # more SMs and reduce divergent pair loops on sparse grids.
+                    block_dim=config.contact_block_dim,
                     inputs=[
                         self.active,
                         self.count,
@@ -1215,6 +1227,7 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
                     inputs=[
                         self.node_velocity,
                         self.tissue_field,
+                        config.fields,
                         self.fragment_sizes,
                         config.grain_threshold,
                         self.interface,
