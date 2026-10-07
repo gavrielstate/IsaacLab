@@ -2,7 +2,8 @@ Native cake crushing with Newton MPM
 ====================================
 
 ``IsaacContrib-Cake-Smash-Direct`` is a single-workcell Isaac Lab task. A solid
-2 kg cherry falls 30 mm onto a layered cake. Newton's native implicit MPM,
+2 kg cherry starts at X=0.000 m, Y=0.020 m, Z=0.500 m and falls onto a
+layered cake. Newton's native implicit MPM,
 MuJoCo Warp and coupled proxy solvers produce the motion. The standard Lab
 ``newton_rtx`` visualizer renders a deforming Gaussian field, stand and cherry.
 There is no task-specific viewer or simulation loop.
@@ -40,7 +41,9 @@ and draws the controls each UI frame. ``set_drop_pose`` writes the rigid pose
 and velocity through Lab's asset API and updates kinematics without advancing
 physics. Renderer history clearing is deferred until the next frame boundary.
 
-The default render is 1280x960 with DLSS Quality and frame generation disabled.
+The default render is 1280x960 with DLSS Quality, one requested RTPT sample
+per pixel and frame generation disabled. Append ``env.render_samples=8`` to
+the launch command to request eight samples per pixel; use a positive integer.
 Drag the window border or maximize it to enlarge the view. Newton keeps the
 render resolution fixed during window resizing, so enlargement scales the
 image. Override ``env.sim.default_visualizer_cfg.window_width`` and
@@ -51,8 +54,10 @@ No recording or output directory is required.
 Assets and physical configuration
 ---------------------------------
 
-Large generated assets are external to the source package. A distributable
-asset bundle, licensing and hosting are required before public release.
+Large generated assets are external to the source package. The reference cake
+and pedestal geometry were generated procedurally, and the Gaussian appearance
+was fitted to renders of that geometry. Share the inputs as a versioned asset
+bundle alongside setup instructions.
 The reference physics USD requires ``stand_mesh.usdc`` and the referenced
 ``textures/color_3F4738.exr`` beside it and contains
 ``/World/Cake`` particle layers, ``/World/Cherry`` with a sphere collider and

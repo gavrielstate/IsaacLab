@@ -32,7 +32,9 @@ def test_native_cake_contact_and_reset_replays_initial_response(device):
     asset = os.environ.get("ISAACLAB_CAKE_PHYSICS_USD_PATH")
     if not asset:
         pytest.skip("External 936-particle reference cake asset was not selected.")
-    cfg = CakeSmashEnvCfg(physics_asset_path=asset)
+    # An offset drop exercises horizontal reciprocal contact independently
+    # of the interactive example's centered, higher default drop.
+    cfg = CakeSmashEnvCfg(physics_asset_path=asset, drop_offset=(0.055, 0.020), drop_height=None)
     cfg.sim.device = device
     env = gym.make("IsaacContrib-Cake-Smash-Direct", cfg=cfg).unwrapped
     try:

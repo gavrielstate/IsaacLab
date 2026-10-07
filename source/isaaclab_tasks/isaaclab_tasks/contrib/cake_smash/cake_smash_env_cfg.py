@@ -32,12 +32,14 @@ class CakeSmashEnvCfg(DirectRLEnvCfg):
 
     physics_asset_path: str = os.environ.get("ISAACLAB_CAKE_PHYSICS_USD_PATH", MISSING)
     gaussian_asset_path: str | None = os.environ.get("ISAACLAB_CAKE_GAUSSIAN_USD_PATH")
+    render_samples: int = 1
+    """Requested OVRTX RTPT samples per pixel; override with env.render_samples."""
     cherry_mass: float = 2.0
     material_strength_scale: float = 1.0
     """Scale authored MPM stiffness and yield limits; lower values soften the cake."""
     drop_gap: float = 0.03
-    drop_offset: tuple[float, float] = (0.055, 0.020)
-    drop_height: float | None = None
+    drop_offset: tuple[float, float] = (0.000, 0.020)
+    drop_height: float | None = 0.500
     """Cherry center Z [m]; None derives the height from the authored cake and drop_gap."""
     gravity_only: bool = False
     reset_on_timeout: bool = False
@@ -67,7 +69,6 @@ class CakeSmashEnvCfg(DirectRLEnvCfg):
                 "omni:rtx:dlss:frameGeneration": ("Bool", False),
                 "omni:rtx:post:aa:op": ("Token", "dlss"),
                 "omni:rtx:post:dlss:execMode": ("Token", "quality"),
-                "omni:rtx:rtpt:spp": ("Int", 1),
             },
         ),
         physics=NewtonCfg(

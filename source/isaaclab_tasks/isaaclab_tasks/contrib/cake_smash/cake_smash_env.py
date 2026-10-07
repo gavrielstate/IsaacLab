@@ -16,6 +16,7 @@ import torch
 import warp as wp
 from isaaclab_newton.assets import MPMObjectCfg
 from isaaclab_newton.physics import NewtonManager, NewtonMPMManager
+from isaaclab_visualizers.newton import NewtonRTXVisualizerCfg
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 
@@ -112,6 +113,8 @@ class CakeSmashEnv(DirectRLEnv):
     def __init__(self, cfg: CakeSmashEnvCfg, render_mode: str | None = None, **kwargs):
         if cfg.scene.num_envs != 1:
             raise ValueError("CakeSmash currently validates one workcell; multi-world isolation is not verified.")
+        if type(cfg.render_samples) is not int or cfg.render_samples < 1:
+            raise ValueError("render_samples must be a positive integer.")
         self.gaussian_stream = None
         self._gaussian_visualizers = []
         self._asset_directory = tempfile.TemporaryDirectory(prefix="isaaclab-cake-")
@@ -119,6 +122,15 @@ class CakeSmashEnv(DirectRLEnv):
         self.component_names, initial_pos = _prepare_asset(cfg, adapter_path)
         self._initial_drop_height = initial_pos[2]
         cfg = replace(cfg)
+        visualizer_cfgs = cfg.sim.visualizer_cfgs
+        if not isinstance(visualizer_cfgs, list):
+            visualizer_cfgs = [visualizer_cfgs]
+        for visualizer_cfg in [cfg.sim.default_visualizer_cfg, *visualizer_cfgs]:
+            if isinstance(visualizer_cfg, NewtonRTXVisualizerCfg):
+                visualizer_cfg.render_settings = {
+                    **(visualizer_cfg.render_settings or {}),
+                    "omni:rtx:rtpt:spp": ("Int", cfg.render_samples),
+                }
         # One root owns USD physics import. Runtime views do not reimport their
         # overlapping descendant subtrees into Newton.
         cfg.scene.cake_asset = AssetBaseCfg(
