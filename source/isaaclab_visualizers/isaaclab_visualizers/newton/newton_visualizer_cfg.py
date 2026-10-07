@@ -77,6 +77,9 @@ class NewtonVisualizerCfg(VisualizerCfg):
     show_collision: bool = False
     """Show collision visualization."""
 
+    show_static: bool = False
+    """Show static collision shapes in addition to their visual geometry."""
+
     show_springs: bool = False
     """Show spring visualization."""
 
@@ -178,3 +181,9 @@ class NewtonRTXVisualizerCfg(NewtonVisualizerCfg):
     copyable. For example, ``{"omni:rtx:quality": ("Int", 100)}`` re-enables the path tracer's
     quality convergence loop, which ``ViewerRTX`` otherwise disables to keep interactive latency
     down."""
+
+    distant_light_rotation: tuple[float, float, float] | None = None
+    """Optional XYZ Euler rotation [degrees] of the default distant light."""
+
+    async_rendering: bool = True
+    """Overlap rendering with subsequent physics; wait before stream input reuse."""

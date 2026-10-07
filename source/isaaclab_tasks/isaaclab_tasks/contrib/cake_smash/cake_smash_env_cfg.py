@@ -11,6 +11,7 @@ import os
 from dataclasses import MISSING
 
 from isaaclab_newton.physics import MJWarpSolverCfg, MPMSolverCfg, NewtonCfg, NewtonCollisionPipelineCfg
+from isaaclab_visualizers.newton import NewtonRTXVisualizerCfg
 
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
@@ -30,10 +31,17 @@ class CakeSmashEnvCfg(DirectRLEnvCfg):
     """
 
     physics_asset_path: str = os.environ.get("ISAACLAB_CAKE_PHYSICS_USD_PATH", MISSING)
+    gaussian_asset_path: str | None = os.environ.get("ISAACLAB_CAKE_GAUSSIAN_USD_PATH")
     cherry_mass: float = 2.0
+    material_strength_scale: float = 1.0
+    """Scale authored MPM stiffness and yield limits; lower values soften the cake."""
     drop_gap: float = 0.03
     drop_offset: tuple[float, float] = (0.055, 0.020)
+    drop_height: float | None = None
+    """Cherry center Z [m]; None derives the height from the authored cake and drop_gap."""
     gravity_only: bool = False
+    reset_on_timeout: bool = False
+    """Use manual episode reset by default; enable timed resets for batch execution."""
     decimation = 4
     episode_length_s = 10.0
     action_space = 1
@@ -45,6 +53,23 @@ class CakeSmashEnvCfg(DirectRLEnvCfg):
     sim: SimulationCfg = SimulationCfg(
         dt=1.0 / 120.0,
         render_interval=4,
+        default_visualizer_cfg=NewtonRTXVisualizerCfg(
+            eye=(0.4666667, -0.7066667, 0.4933333),
+            lookat=(0.0, 0.0, 0.20),
+            focal_length=18.45763,
+            background_color=None,
+            window_width=1280,
+            window_height=960,
+            enable_picking=True,
+            show_static=True,
+            distant_light_rotation=(45, -30, 0),
+            render_settings={
+                "omni:rtx:dlss:frameGeneration": ("Bool", False),
+                "omni:rtx:post:aa:op": ("Token", "dlss"),
+                "omni:rtx:post:dlss:execMode": ("Token", "quality"),
+                "omni:rtx:rtpt:spp": ("Int", 1),
+            },
+        ),
         physics=NewtonCfg(
             solver_cfg=CouplerProxyCfg(
                 entries=[

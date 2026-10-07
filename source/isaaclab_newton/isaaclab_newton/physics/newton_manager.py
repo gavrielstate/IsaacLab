@@ -1789,6 +1789,24 @@ class NewtonManager(PhysicsManager):
         return None if cls.backend is None else cls.backend.model
 
     @classmethod
+    def get_solver(cls) -> SolverBase | None:
+        """Return the active native solver, or None before solver initialization.
+
+        Consumers of solver-specific output, such as native MPM material frames,
+        can use its public APIs without accessing manager implementation fields.
+        """
+        return cls._solver
+
+    @classmethod
+    def has_captured_cuda_graph(cls) -> bool:
+        """Return whether the physics loop has an existing captured CUDA graph.
+
+        Graph-safe consumers must register physics callbacks before capture so
+        their launches are included in the replayed loop.
+        """
+        return cls._graph is not None
+
+    @classmethod
     def get_state_0(cls) -> State:
         """Get the current state."""
         return None if cls.backend is None else cls.backend.state_0

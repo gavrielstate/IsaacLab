@@ -29,7 +29,10 @@ class CakeGaussianStream:
     def __init__(self, env, asset_path: str):
         self.env = env
         self._array_stream = None
-        if env.common_step_counter != 0 or NewtonManager._graph is not None:
+        self._renderer = None
+        self.prepared = None
+        self._published_step = None
+        if env.common_step_counter != 0 or NewtonManager.has_captured_cuda_graph():
             raise ValueError("Construct the cake Gaussian stream before advancing physics.")
         cfg = env.cfg.sim.physics
         if NewtonManager.handles_decimation() or cfg.num_substeps != 1:
@@ -68,9 +71,9 @@ class CakeGaussianStream:
         nearest = cKDTree(rest).query(self.asset["xyz"][decoration])[1]
         visual_regions[decoration] = physical_regions[nearest]
         self.asset["regions"] = visual_regions
-        # NewtonManager has no public solver accessor in this checkout. This
-        # isolated access is the only bridge to its existing native coupler.
-        coupled = NewtonManager._solver
+        coupled = NewtonManager.get_solver()
+        if coupled is None:
+            raise RuntimeError("Initialize the native Newton solver before constructing a Gaussian stream.")
         self.solver = coupled.solver("cake")
         self.state = coupled.entry_state("cake")
         self.path = "/World/CakeGaussians"
@@ -101,6 +104,7 @@ class CakeGaussianStream:
         UsdGeom.Boundable(prim).CreateExtentAttr(Vt.Vec3fArray.FromNumpy(extent))
 
     def bind(self, renderer) -> None:
+        self._renderer = renderer
         self._array_stream = GaussianArrayStream(
             renderer, [self.path], {"positions": 3, "scales": 3, "orientations": 4}
         )
@@ -113,6 +117,22 @@ class CakeGaussianStream:
             xyz, scales, transform = self.frame.evaluate(xyz, scales)
         return transform, {"positions": [xyz], "scales": [scales], "orientations": [rotations]}
 
+    def publish(self, renderer) -> None:
+        """Prepare and retain geometry for Lab's standard RTX visualizer."""
+        step = self.env.sim.get_physics_step_count()
+        if self._published_step == step:
+            # Rewriting unchanged fields prevents RTX temporal convergence.
+            # Camera-only redraws must keep the existing geometry bindings.
+            return
+        self.prepared = self.prepare()
+        wp.synchronize_device(self.env.particle_positions.device)
+        self.update(renderer, self.prepared)
+        self._published_step = step
+
+    def invalidate(self) -> None:
+        """Republish after state restoration without a physics step."""
+        self._published_step = None
+
     def update(self, renderer, prepared) -> None:
         from ovrtx import Semantic  # noqa: PLC0415
 
@@ -122,14 +142,28 @@ class CakeGaussianStream:
         )
         self._array_stream.write(values)
 
-    def verify(self, renderer, prepared) -> None:
+    def verify(self, renderer=None, prepared=None) -> None:
         """Read back published arrays outside timing; visible frames still need inspection."""
+        if renderer is None:
+            renderer = self._renderer
+        if prepared is None:
+            prepared = self.prepared
+        if self._array_stream is None or prepared is None:
+            raise RuntimeError("Publish Gaussian geometry before verification.")
         _, values = prepared
         self._array_stream.verify(
             renderer, {name: [array.numpy() for array in arrays] for name, arrays in values.items()}
         )
 
-    def close(self) -> None:
-        NewtonManager.unregister_post_step_callback(self.advance_frames)
+    def release_renderer(self) -> None:
+        """Release renderer bindings while keeping captured physics frames alive."""
         if self._array_stream is not None:
             self._array_stream.close()
+            self._array_stream = None
+        self._renderer = None
+        self.prepared = None
+        self.invalidate()
+
+    def close(self) -> None:
+        self.release_renderer()
+        NewtonManager.unregister_post_step_callback(self.advance_frames)

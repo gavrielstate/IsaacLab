@@ -815,6 +815,11 @@ class SimulationContext:
                 while viz.is_training_paused() and viz.is_running():
                     viz.step(0.0)
                 viz.step(dt)
+                # UI callbacks can request a pause during the frame just drawn.
+                # Honor it before returning to physics, rather than advancing
+                # another render interval before noticing the new pause state.
+                while viz.is_training_paused() and viz.is_running():
+                    viz.step(0.0)
             except Exception as exc:
                 logger.error("Error stepping visualizer '%s': %s", type(viz).__name__, exc)
                 visualizers_to_remove.append(viz)

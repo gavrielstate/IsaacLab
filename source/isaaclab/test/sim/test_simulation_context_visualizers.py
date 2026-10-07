@@ -75,6 +75,7 @@ class _FakeVisualizer(BaseVisualizer):
         closed=False,
         rendering_paused=False,
         training_paused_steps=0,
+        pause_during_frame=False,
         raises_on_step=False,
         requires_forward=False,
         pumps_app_update=False,
@@ -85,6 +86,7 @@ class _FakeVisualizer(BaseVisualizer):
         self._closed = closed
         self._rendering_paused = rendering_paused
         self._training_paused_steps = training_paused_steps
+        self._pause_during_frame = pause_during_frame
         self._raises_on_step = raises_on_step
         self._requires_forward = requires_forward
         self._pumps_app_update = pumps_app_update
@@ -113,6 +115,8 @@ class _FakeVisualizer(BaseVisualizer):
 
     def step(self, dt):
         self.step_calls.append(dt)
+        if dt > 0.0 and self._pause_during_frame:
+            self._training_paused_steps = 1
         if self._raises_on_step:
             raise RuntimeError("step failed")
 
@@ -216,14 +220,16 @@ def test_update_visualizers_skips_zero_dt_for_paused_app_pumping_visualizer():
     assert paused_app_pumping_viz.step_calls == []
 
 
-def test_update_visualizers_handles_training_pause_loop():
+@pytest.mark.parametrize("pause_during_frame", [False, True])
+def test_update_visualizers_handles_training_pause_loop(pause_during_frame):
+    """Pause before or during UI drawing is pumped before physics can continue."""
     provider = _FakeProvider()
-    viz = _FakeVisualizer(training_paused_steps=1)
+    viz = _FakeVisualizer(training_paused_steps=1, pause_during_frame=pause_during_frame)
     ctx = _make_context([viz], provider=provider)
 
     ctx.update_visualizers(0.2)
 
-    assert viz.step_calls == [0.0, 0.2]
+    assert viz.step_calls == ([0.0, 0.2, 0.0] if pause_during_frame else [0.0, 0.2])
 
 
 class _LivePlotVisualizer(_FakeVisualizer):

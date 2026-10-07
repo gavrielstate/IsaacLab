@@ -1,204 +1,117 @@
-Native layered cake crushing
-============================
+Native cake crushing with Newton MPM
+====================================
 
-``IsaacContrib-Cake-Smash-Direct`` is a single-workcell Isaac Lab Gym demonstration.
-An initially stationary solid 2 kg cherry falls 30 mm onto an off-center region
-of the cake. The stand stays a solid mesh. Nine separately authored cake layers
-are native ``MPMObject`` assets with heterogeneous masses and constitutive
-materials, coupled to ordinary rigid dynamics through
-``CouplerProxyCfg`` with physical proxy mass scale 1.0.
+``IsaacContrib-Cake-Smash-Direct`` is a single-workcell Isaac Lab task. A solid
+2 kg cherry falls 30 mm onto a layered cake. Newton's native implicit MPM,
+MuJoCo Warp and coupled proxy solvers produce the motion. The standard Lab
+``newton_rtx`` visualizer renders a deforming Gaussian field, stand and cherry.
+There is no task-specific viewer or simulation loop.
 
-The task uses unmodified Newton ``SolverImplicitMPM``, ``SolverMuJoCo`` on the
-GPU and ``SolverCoupledProxy``. It contains no particle motion, fracture,
-damage or seam-release kernels. Dropping is an initial condition; the reserved
-scalar action has no effect and the reward is zero. This is a reproducible
-physics demonstration, not a trained robot policy. Multi-workcell execution is
-rejected until isolation and per-world reset are verified.
+Run interactively
+-----------------
 
-External assets
----------------
-
-Set ``ISAACLAB_CAKE_PHYSICS_USD_PATH`` or pass ``physics_asset_path`` explicitly.
-The current reference asset is
-``tradeoff_p936_h120_gap03_sparse_i60_c1024.usda``. It requires the referenced
-``stand_mesh.usdc`` alongside it. Large generated binary assets are not included
-in Isaac Lab source; public redistribution and hosting must be agreed before
-shipping. The source schema contract is ``/World/Cake`` with separate
-``UsdGeom.Points`` components, ``/World/Cherry`` with a sphere collider and
-``/World/Stand`` with a solid mesh collider.
-
-At startup a temporary flattened USD file adapts component prim paths to the
-existing MPMObject ``geometry/points`` convention. Particle position, mass,
-width, per-layer material binding and initial plastic volume strain are copied
-from USD. Cherry mass, gap and horizontal offset are ordinary configurable
-physical initial conditions. Reset restores positions, velocities and native
-MPM/rigid solver history; it does not retain prior cake deformation.
-
-Run camera-free physics
------------------------
-
-From the Isaac Lab repository root:
+Install Isaac Lab's Newton and OVRTX dependencies and obtain the external
+physics and Gaussian assets. From the Isaac Lab repository root:
 
 .. code-block:: bash
 
-   uv run --no-sync python -m isaaclab_tasks.contrib.cake_smash.demo \
-       --physics-asset /path/to/tradeoff_p936_h120_gap03_sparse_i60_c1024.usda \
-       --device cuda:0 --seconds 5 --trials 3 --output /tmp/cake_physics.json
+   export ISAACLAB_CAKE_PHYSICS_USD_PATH=/path/to/isaaclab_cake_all_firm_stand64_visuals.usdc
+   export ISAACLAB_CAKE_GAUSSIAN_USD_PATH=/path/to/cake_live_ovrtx_lod_surface2_interior4.usdc
+   uv run --no-sync isaaclab zero_agent \
+       --task IsaacContrib-Cake-Smash-Direct --visualizer newton_rtx --num_envs 1
 
-Use ``--gym-step`` to include Gym observation, reward, termination and task
-bookkeeping. Use ``--gravity-only`` to move the cherry outside the workcell and
-measure the cake's response under its own weight. ``--physics-hz``,
-``--iterations``, ``--capacity``, ``--mass``, ``--gap`` and ``--offset`` select
-native configurations and initial conditions. ``--physics-hz`` must be a positive multiple of 30 Hz.
+Use **Pause/Resume simulation** and **Reset episode** in the standard sidebar.
+Right-click and hold on the cherry, then drag to apply Newton's native spring
+force while simulation runs. Release the mouse button to stop pulling. Picking
+uses rigid collision geometry; it does not select the deformable Gaussian cake.
+While paused, moving the spring target affects the cherry on Resume or a
+single physics step, rather than immediately placing it.
+The **Cake drop** panel contains cherry X/Y and center Z sliders and Center,
+Left, Right, Rim and Cut face presets. Z is the cherry center height in meters,
+not a gap above the cake. Changing a slider or preset immediately places an
+upright, stationary cherry and pauses windowed simulation. Resume releases it
+from that position. The cake and camera stay unchanged; Reset episode restores
+the cake and uses the selected XYZ position. Episodes reset manually by default. Set
+``env.reset_on_timeout=True`` to enable ordinary timed Gym resets.
 
-Physics timing excludes startup, compilation, CUDA graph capture, reset,
-rendering and diagnostics. Particle state remains on the GPU during the timed
-loop, with one explicit synchronization at the end. The simulation context also
-reads Newton's latest and accumulated sparse-grid safety status arrays
-(one uint32 each) after every physics tick, synchronizing the device.
-Use ``--graph-replay`` for pure native graph timing with that safety status
-checked only after the loop; this mode has no CPU data readback per tick. The report checks native solver
-types, layer particle counts, cake mass, finite particles, exact state reset
-and repeated response. Repeated long episodes are not claimed bitwise
-deterministic: late fragment contacts can amplify tiny floating-point
-differences. Separate the physics-only rate from end-to-end rendering
-and capture performance.
+The task registers ``_render_drop_controls`` with the standard visualizer's
+``register_ui_callback(..., position="panel")``. The callback receives ImGui
+and draws the controls each UI frame. ``set_drop_pose`` writes the rigid pose
+and velocity through Lab's asset API and updates kinematics without advancing
+physics. Renderer history clearing is deferred until the next frame boundary.
 
-The current passive environment has no actuated articulation, so
-``NewtonManager.handles_decimation()`` returns False. One simulation-context
-step advances **one** 120 Hz physics tick; one Gym step advances four ticks.
-Benchmarking 150 simulation-context calls would simulate only 1.25 s, not 5 s.
-The benchmark uses 600 calls for five seconds. A post-step visual material-frame
-callback also runs at every physics tick in this configuration. Adding an
-actuated robot or changing MPM entry substeps requires revisiting that cadence.
+The default render is 1280x960 with DLSS Quality and frame generation disabled.
+Drag the window border or maximize it to enlarge the view. Newton keeps the
+render resolution fixed during window resizing, so enlargement scales the
+image. Override ``env.sim.default_visualizer_cfg.window_width`` and
+``env.sim.default_visualizer_cfg.window_height`` in the Lab command to choose
+another render size. Mouse controls orbit, pan and zoom the camera.
+No recording or output directory is required.
 
-The 1024-cell sparse budget is validated only for the reference episode and
-must be increased for motions with greater spread. Material values are
-qualitative cake calibration, not food measurements. Gravity-only checks
-remain important: finite particles and a fast benchmark do not establish that
-a cake stands still or looks realistic.
-
-Focused physical/reset regression
+Assets and physical configuration
 ---------------------------------
 
-.. code-block:: bash
+Large generated assets are external to the source package. A distributable
+asset bundle, licensing and hosting are required before public release.
+The reference physics USD requires ``stand_mesh.usdc`` and the referenced
+``textures/color_3F4738.exr`` beside it and contains
+``/World/Cake`` particle layers, ``/World/Cherry`` with a sphere collider and
+``/World/Stand`` with a solid mesh collider. The Gaussian USD contains
+``/World/Cake`` as ``ParticleField3DGaussianSplat``, radiance materials under
+``/World/Looks`` and ``cake:component_ids`` matching the physical layers.
 
-   ISAACLAB_CAKE_PHYSICS_USD_PATH=/path/to/reference.usda \
-       uv run --no-sync python -m pytest source/isaaclab_tasks/test/contrib/test_cake_smash_native.py -q
+The task imports authored positions, masses, widths and constitutive materials.
+A temporary flattened USD adapts paths to the existing MPMObject geometry
+convention. Reset restores native material and coupled-solver history.
+Gaussian skinning consumes particle positions and native material frames;
+it does not change physical motion. Pending rendering finishes before reset
+or buffer reuse, and renderer bindings release before renderer destruction.
+Camera-only redraws retain the published field until physics advances or an
+episode reset invalidates it. This lets RTX temporal reconstruction converge
+instead of repeatedly invalidating it with unchanged Gaussian array uploads.
+Motion-related shimmer remains under investigation; increasing the requested
+RTPT samples alone did not reduce it in the validated runtime.
 
-The test protects ordinary reciprocal collision and replay after a crushing episode. It is skipped when the external reference asset is absent.
-Gaussian skinning/rendering is an independent consumer of these native
-positions and material frames; it must not alter the physics state.
+Physics runs at 120 Hz with four physics ticks per Gym step and 30 Hz rendering.
+The default reference uses 936 particles, a 26 mm grid,
+60 solver iterations, S2 collider basis and a 1,024-cell sparse grid budget. Cherry mass, gap and horizontal
+position are task configuration fields. Material values are qualitative cake
+calibration. The reserved scalar action has no effect and reward is zero.
+Multi-workcell execution is rejected until isolation and per-world reset are
+verified. Robot decimation and multiple MPM entry substeps require additional
+Gaussian callback scheduling support.
 
-Gaussian preparation and live rendering
----------------------------------------
+Validation
+----------
 
-The external Gaussian USD must contain ``/World/Cake`` as a native
-``ParticleField3DGaussianSplat`` with ``cake:component_ids`` matching the
-nine physical component names. ``/World/Looks`` contains authored radiance
-materials. Decorative Gaussians with negative component IDs bind to their
-nearest physical layer; named layer supports stay within that component.
-The current degree-zero field includes both exterior and interior Gaussians.
-
-Validate skinning, native display frames and reset without a renderer:
-
-.. code-block:: bash
-
-   uv run --no-sync python -m isaaclab_tasks.contrib.cake_smash.validate_skinning \
-       --physics-asset /path/to/reference.usda \
-       --gaussian-asset /path/to/cake_live_ovrtx.usdc \
-       --output /tmp/cake_skinning.json
-
-This preparation check is independent of rendered visibility. Live cake
-Gaussian deformation and solid stand/cherry rendering have also been verified
-with OVRTX 0.6 and OVStage 0.3. Install an authorized wheel pair with Nicolas'
-berry setup script and preserve those builds with ``uv run --no-sync``:
-
-.. code-block:: bash
-
-   bash source/isaaclab_tasks/isaaclab_tasks/contrib/franka_pick_berries/setup/setup.sh \
-       --renderer-wheels /path/to/wheelhouse
-   export UV_PROJECT_ENVIRONMENT="$PWD/.venv-tasks"
-
-Run the live native viewer:
+With the external reference assets selected, run the standard RTX publication
+and reset test:
 
 .. code-block:: bash
 
-   uv run --no-sync python -m isaaclab_tasks.contrib.cake_smash.render_demo \
-       --physics-asset /path/to/reference.usda \
-       --gaussian-asset /path/to/cake_live_ovrtx.usdc \
-       --seconds 5 --width 960 --height 720 --video --verify-render --output /tmp/cake_render
+   uv run --no-sync python -m pytest \
+       source/isaaclab_tasks/test/contrib/test_cake_smash_newton_rtx.py -q
 
-Open the native RTX viewer from a graphics desktop:
+The RTX test checks visible cake publication, deformation without rendering
+changing physics, manual reset behavior, cherry repositioning and GPU resource
+lifetime. Benchmark campaigns and video composition tools are development
+working material outside this runtime package.
 
-.. code-block:: bash
+The historical native contact/replay fixture separately requires the original
+936-particle ``isaaclab_cake_all_firm_stand64_visuals.usdc`` selected through
+``ISAACLAB_CAKE_PHYSICS_USD_PATH``. It retains that asset's original 26 mm grid
+to compare the same authored response. Run it with
+``python -m pytest source/isaaclab_tasks/test/contrib/test_cake_smash_native.py -q``.
 
-   uv run --no-sync python -m isaaclab_tasks.contrib.cake_smash.render_demo \
-       --physics-asset /path/to/reference.usda \
-       --gaussian-asset /path/to/cake_live_ovrtx.usdc \
-       --window --paused --lighting front --offset 0.09 0.02
+Material softness
+-----------------
 
-Space toggles pause, period steps one display frame, and the native Reset
-button restarts physics and clears renderer history. H hides/shows the native
-panels, and native mouse controls orbit or zoom the camera. The final state
-remains available after ``--seconds`` until reset or window closure. Window
-mode needs no output directory. Use the headless command separately for video
-and array verification. Direct CUDA/OpenGL presentation uses an NVIDIA graphics
-context on the simulation GPU. If texture registration is unavailable (for
-example, a software Xvfb/llvmpipe display), the task automatically presents the
-finished RTX color image through CPU upload in a pyglet window, retaining
-Newton's native GUI/camera controls. Physics, skinning and RTX rendering remain
-on GPU. This presentation fallback copies only the finished RGBA image and adds
-display cost. Window performance is separate from headless measurements.
-
-``--physics-hz`` selects 30, 60, 90 or 120 Hz, and ``--render-fps`` selects
-15 or 30 frames/s. The default is 120 Hz physics with 30 frames/s rendering;
-changing the display rate does not lower physics frequency. ``--async-render``
-uses OVRTX's existing asynchronous renderer/data-access path to overlap rendering
-with subsequent physics. Reported loop time includes the final renderer
-completion wait. ``--width``, ``--height`` and ``--samples`` control rendering
-cost; ``--iterations`` and ``--capacity`` control the native solver. Recheck
-gravity support and impact behavior when changing physics frequency or solve
-accuracy. Skinning uses Nicolas' existing affine4 binding and native MPM frames.
-``--antialiasing quality`` selects native DLSS Quality upscaling; ``default``
-preserves inherited settings and ``dlaa`` selects full-resolution DLAA. Quality
-can soften small crumbs and curls. ``--collider-basis Q1`` is an experimental
-native alternative; the validated reference retains S2.
-The camera includes the full cherry stem. ``--lighting front`` selects the
-native dome/distant light rig aimed at the cut face; ``studio`` remains the
-default. These choices change appearance only.
-
-The full field contains 620,171 Gaussians. An external 2 mm surface / 4 mm interior
-candidate retains 267,055 Gaussians, including 75,944 interior Gaussians and
-all decorative curls. Paired with a profile-preserving 64-segment solid stand
-collider, 120 Hz physics, 60 native iterations, 640x480 output, 15 fps and DLSS
-Quality with the current wide camera and front light, three warmed single-L40
-trials take 4.953, 4.913 and 4.893 s for five simulated seconds (median 1.018x).
-This has very little realtime margin. At 30 fps, one DLSS
-Quality trial takes 5.896 s (0.848x). The original full-detail 960x720 reference
-takes approximately 0.40x on the unconstrained two-L40 host. These are
-physics/skinning/render rates excluding CPU video capture and encoding;
-they are different presets, not isolated Gaussian-count comparisons.
-
-Restrict ``CUDA_VISIBLE_DEVICES=0`` for a single-GPU measurement: the native
-OVRTX default can use every visible GPU. Include final renderer completion
-in timing. Video capture waits for each current frame and serializes overlap,
-so a no-capture benchmark is not an encoded-video throughput claim. Assets
-and physics tunings remain external; physics/solver defaults are unchanged.
-
-``render_demo`` uses Newton's existing ``ViewerRTX`` and shared persistent
-OVRTX array bindings. Particle and Gaussian arrays stay on GPU; local-frame
-bounds read six scalars per rendered frame. Rigid transform submission uses
-the native viewer path. Video capture copies rendered pixels to CPU and is
-timed separately. The first render and initialization are excluded from the
-reported warmed loop rate. No Blender renderer or trajectory playback is used.
-``--verify-render`` reads back the final native Gaussian arrays outside loop
-timing. It does not substitute for inspecting visible frames.
-
-Construct the stream before the first physics step so its native display-frame
-callback is included in graph capture. The adapter currently rejects folded
-robot decimation and multiple MPM substeps. Degree-zero cake radiance needs
-no berry SH damage shader. Check persistent array readback and visible motion
-when changing renderer builds; the 0.5 version guard must not be bypassed.
-Isaac Lab sensor rendering requires separate validation from the standalone
-native viewer.
+Append ``env.material_strength_scale=0.8`` to the ordinary Lab launch command
+to soften the authored cake material. The default ``1.0`` preserves the USD
+material. Positive lower values scale Young's modulus, yield pressure, yield
+stress and elastic damping together; mass, density, geometry, friction and
+viscosity stay authored. This setting applies at startup, so restart the task
+after changing it. Keep the original 936-particle asset paired with the default 26 mm grid.
+The experimental 26,832-particle asset requires an 8 mm grid and a 32,768-cell
+sparse budget, configured through ``env.sim.physics.solver_cfg.entries.1.solver_cfg.voxel_size``
+and ``env.sim.physics.solver_cfg.entries.1.solver_cfg.max_active_cell_count``.

@@ -15,7 +15,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np  # noqa: F401 — used in type hints and colorization helpers
 import torch
@@ -91,6 +91,32 @@ CONTACT_ARROW_COLOR = (0.0, 1.0, 0.0)
 
 CONTACT_ARROW_LENGTH = 0.1
 """Length of synthesized contact arrows in meters."""
+
+
+class RTXSceneStream(Protocol):
+    """Task-owned GPU geometry published through the standard RTX lifecycle.
+
+    Author before the renderer builds its scene, then bind and publish completed
+    caller-owned buffers. The viewer waits before the next publication and
+    releases bindings before renderer destruction. Physics callbacks and their
+    captured buffers remain owned by the task for its entire lifetime.
+    """
+
+    def author(self, stage: Any) -> None:
+        """Author geometry and materials into the viewer stage before scene build."""
+        ...
+
+    def bind(self, renderer: Any) -> None:
+        """Bind attributes after renderer scene initialization."""
+        ...
+
+    def publish(self, renderer: Any) -> None:
+        """Prepare, fence and retain GPU inputs through render completion."""
+        ...
+
+    def release_renderer(self) -> None:
+        """Release bindings without detaching captured physics callbacks."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -665,6 +691,7 @@ class NewtonViewerRTX(_NewtonViewerUIMixin, ViewerRTX):
         update_frequency: int = 1,
         background_color: tuple[float, float, float] | None = None,
         render_settings: dict[str, Any] | None = None,
+        distant_light_rotation: tuple[float, float, float] | None = None,
         **kwargs,
     ):
         """Initialize Newton RTX viewer wrapper state.
@@ -685,6 +712,8 @@ class NewtonViewerRTX(_NewtonViewerUIMixin, ViewerRTX):
             tuple(float(value) for value in background_color) if background_color is not None else None
         )
         self._render_settings = dict(render_settings or {})
+        self._distant_light_rotation = distant_light_rotation
+        self._scene_streams: list[RTXSceneStream] = []
 
         super().__init__(*args, **kwargs)
         self._paused_training = False
@@ -706,6 +735,89 @@ class NewtonViewerRTX(_NewtonViewerUIMixin, ViewerRTX):
         # exist.  Register the training controls now (they are buffered by ViewerRTX until
         # the GUI is available); the panel patch is applied in _init_window() below.
         self.register_ui_callback(self._render_training_controls, position="side")
+
+    def add_scene_stream(self, stream: RTXSceneStream) -> None:
+        """Register task geometry before the first rendered frame."""
+        if self._rtx is not None:
+            raise RuntimeError("RTX scene streams must be registered before the first rendered frame.")
+        if stream in self._scene_streams:
+            raise ValueError("RTX scene stream is already registered.")
+        self._scene_streams.append(stream)
+
+    def finish_frame(self) -> None:
+        """Complete pending rendering before input reuse, capture or reset."""
+        if self._render_result is not None:
+            self._render_products = self._render_result.wait().fetch()
+            self._render_result = None
+
+    def reset_render_history(self, time: float) -> None:
+        """Clear temporal accumulation after an episode restores its geometry."""
+        self.finish_frame()
+        if self._rtx is not None:
+            self._rtx.reset(time=time)
+
+    def end_frame(self) -> None:
+        # Wait before native transforms or stream buffers can be reused, rather
+        # than after publication inside Newton's asynchronous display path.
+        if self._scene_streams:
+            self.finish_frame()
+        super().end_frame()
+
+    def close(self) -> None:
+        renderer = self._rtx
+        try:
+            self.finish_frame()
+        finally:
+            try:
+                with contextlib.ExitStack() as cleanup:
+                    if renderer is not None:
+                        cleanup.callback(renderer.destroy)
+                    cleanup.callback(super().close)
+                    for stream in self._scene_streams:
+                        cleanup.callback(stream.release_renderer)
+            finally:
+                self._scene_streams.clear()
+
+    def _init_ovrtx(self) -> None:
+        for stream in self._scene_streams:
+            stream.author(self.stage)
+        super()._init_ovrtx()
+        for stream in self._scene_streams:
+            stream.bind(self._rtx)
+
+    def _add_default_lights(self) -> None:
+        super()._add_default_lights()
+        if self._distant_light_rotation is not None:
+            from pxr import Gf, UsdGeom
+
+            light = self.stage.GetPrimAtPath("/root/_RTXDistantLight")
+            if light:
+                UsdGeom.Xform(light).GetOrderedXformOps()[0].Set(Gf.Vec3f(*self._distant_light_rotation))
+
+    def _render_and_display(self) -> None:
+        previous_products = self._render_products
+        for stream in self._scene_streams:
+            stream.publish(self._rtx)
+        super()._render_and_display()
+        if self._async and self._render_products is None:
+            self._render_products = previous_products
+        # OVRTX 0.6 keys outputs by prim path. Newton 1.6's literal LdrColor
+        # lookup misses those frames; resolve the semantic source as well.
+        if self._window is None or self._window.context is None or self._should_close:
+            return
+        from ovrtx import Device
+
+        for product in (self._render_products or {}).values():
+            for frame in product.frames:
+                if "LdrColor" in frame.render_vars:
+                    continue  # Already presented by the native viewer.
+                for name, variable in frame.render_vars.items():
+                    if name != "LdrColor" and variable.source_name == "LdrColor":
+                        with variable.map(device=Device.CUDA) as mapping:
+                            pixels = wp.from_dlpack(mapping, dtype=wp.vec4ub)
+                            self._blit_to_window(pixels)
+                            mapping.unmap(stream=pixels.device.stream.cuda_stream)
+                        return
 
     def log_points(self, name, points, radii=None, colors=None, hidden=False):
         """Apply the configured color to Newton's canonical particle batch."""
@@ -738,8 +850,23 @@ class NewtonViewerRTX(_NewtonViewerUIMixin, ViewerRTX):
 
     def get_frame(self) -> np.ndarray:
         """Return the latest OVRTX LDR framebuffer as contiguous RGB pixels."""
-        # TODO: Use Newton's public RGB capture API when one becomes available.
-        return np.ascontiguousarray(self._capture_screenshot_pixels()[..., :3])
+        self.finish_frame()
+        from ovrtx import Device
+
+        for product in (self._render_products or {}).values():
+            for frame in product.frames:
+                variable = frame.render_vars.get("LdrColor")
+                if variable is None:
+                    variable = next(
+                        (value for value in frame.render_vars.values() if value.source_name == "LdrColor"), None
+                    )
+                if variable is not None:
+                    with variable.map(device=Device.CPU) as mapping:
+                        return np.array(np.from_dlpack(mapping)[..., :3], copy=True, order="C")
+        raise RuntimeError("No completed OVRTX LdrColor output for RGB capture.")
+
+    def _capture_screenshot_pixels(self) -> np.ndarray:
+        return self.get_frame()
 
     def _init_window(self) -> None:
         """Create the viewer window and immediately apply Isaac Lab UI patches."""
@@ -1207,6 +1334,7 @@ class NewtonVisualizer(BaseVisualizer):
         self._viewer.show_contacts = self.cfg.show_contacts
         self._viewer.show_collision = self.cfg.show_collision
         self._viewer.show_springs = self.cfg.show_springs
+        self._viewer.show_static = self.cfg.show_static
         self._viewer.show_inertia_boxes = self.cfg.show_inertia_boxes
         self._viewer.show_com = self.cfg.show_com
         self._viewer.show_particles = self.cfg.show_particles
@@ -1414,6 +1542,16 @@ class NewtonVisualizer(BaseVisualizer):
         if not self._is_initialized or self._viewer is None:
             return False
         return bool(self._viewer.is_key_down(key))
+
+    def register_ui_callback(self, callback: Callable[[Any], None], position: str = "side") -> None:
+        """Add task controls to a Newton viewer's ImGui interface.
+
+        Args:
+            callback: Callable invoked with the ``imgui`` module every UI frame.
+            position: Newton viewer UI slot, such as ``"side"`` or ``"panel"``.
+        """
+        if self._viewer is not None:
+            self._viewer.register_ui_callback(callback, position=position)
 
     def set_camera_view(
         self, eye: tuple[float, float, float] | list[float], target: tuple[float, float, float] | list[float]
@@ -2086,16 +2224,6 @@ class NewtonGLVisualizer(NewtonVisualizer):
             update_frequency=self.cfg.update_frequency,
         )
 
-    def register_ui_callback(self, callback: Callable[[Any], None], position: str = "side") -> None:
-        """Add a panel to the viewer's ImGui interface.
-
-        Args:
-            callback: Callable invoked with the ``imgui`` module every UI frame.
-            position: Newton viewer UI slot, such as ``"side"`` or ``"panel"``.
-        """
-        if self._viewer is not None:
-            self._viewer.register_ui_callback(callback, position=position)
-
     def request_close(self) -> None:
         """Close the viewer window once the current frame ends.
 
@@ -2361,13 +2489,63 @@ class NewtonRTXVisualizer(NewtonVisualizer):
             cfg: RTX visualizer configuration.
         """
         super().__init__(cfg)
+        # Pending headless visualizers must request visual geometry before
+        # cloning; they are not yet counted by has_active_visualizers().
+        sim = SimulationContext.instance()
+        if sim is not None:
+            sim.require_visual_shapes()
         self.cfg: NewtonRTXVisualizerCfg = cfg
         self._rtx_fov_pending = False
+        self._render_history_reset_requested = False
         # OVRTX loads lazily on first begin_frame(); disable permanently on first failure
         # so a missing/broken OVRTX install doesn't spam the log every step.
         self._disable_viewer_on_step_exception = True
 
+    def set_training_paused(self, paused: bool) -> None:
+        """Set the same simulation pause state controlled by the Lab sidebar."""
+        if self._viewer is not None:
+            self._viewer._paused_training = bool(paused)
+
+    def add_scene_stream(self, stream: RTXSceneStream) -> None:
+        """Attach task-owned GPU geometry before first rendering or graph capture."""
+        if self._viewer is None:
+            raise RuntimeError("Initialize the RTX visualizer before registering scene streams.")
+        self._viewer.add_scene_stream(stream)
+
+    def finish_frame(self) -> None:
+        """Complete the current render without copying pixels to the CPU."""
+        if self._viewer is not None:
+            self._viewer.finish_frame()
+
+    def reset_render_history(self) -> None:
+        """Clear accumulated images after an episode reset, keeping scene bindings."""
+        if self._viewer is not None:
+            self._viewer.reset_render_history(self._sim_time)
+
+    def request_render_history_reset(self) -> None:
+        """Defer temporal history reset until the next frame, safe from UI callbacks."""
+        self._render_history_reset_requested = True
+
+    def _reset_render_history_if_requested(self) -> None:
+        if self._render_history_reset_requested:
+            self.reset_render_history()
+            self._render_history_reset_requested = False
+
+    def render_frame(self) -> None:
+        """Draw an on-demand headless frame; windowed frames use normal step()."""
+        if self._viewer is not None:
+            self._reset_render_history_if_requested()
+            self._render_headless_frame()
+
+    def capture_rgb_array(self) -> np.ndarray | None:
+        """Capture the completed frame without rendering an additional frame."""
+        if self._viewer is None:
+            return None
+        return self._viewer.get_frame()
+
     def _create_viewer(self, runtime_headless: bool, metadata: dict) -> NewtonViewerRTX:
+        sim = SimulationContext.instance()
+        timing = {"fps": 1.0 / (sim.cfg.dt * sim.cfg.render_interval)} if sim is not None else {}
         if not runtime_headless:
             # pyglet sets WM_CLASS from the window caption "Newton RTX Viewer".
             write_desktop_entry(
@@ -2383,6 +2561,9 @@ class NewtonRTXVisualizer(NewtonVisualizer):
             environment=self.cfg.rtx_environment,
             background_color=self.cfg.background_color,
             render_settings=self.cfg.render_settings,
+            distant_light_rotation=self.cfg.distant_light_rotation,
+            async_rendering=self.cfg.async_rendering,
+            **timing,
         )
 
     def _apply_viewer_post_init(self) -> None:
@@ -2416,6 +2597,7 @@ class NewtonRTXVisualizer(NewtonVisualizer):
             pass  # camera not yet created by ViewerRTX; retry next frame
 
     def _pre_step(self) -> None:
+        self._reset_render_history_if_requested()
         self._apply_rtx_fov_if_pending()
 
     def render_rgb_array(self) -> np.ndarray | None:
