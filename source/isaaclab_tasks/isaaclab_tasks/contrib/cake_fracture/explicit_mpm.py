@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import warp as wp
+from newton import StateFlags
 from newton._src.solvers.coupled.interface import CouplingInterface
 from newton.solvers import SolverBase
 
@@ -1035,9 +1036,23 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
         self.errors.zero_()
         self._reported_errors = (0, 0)
 
+    def _resets_particle_history(self, world_mask, flags):
+        """Rigid pose updates must not heal material or erase plastic strain."""
+        if flags is not None and not int(flags) & int(StateFlags.PARTICLE):
+            return False
+        if world_mask is not None:
+            world_mask = self._normalize_reset_world_mask(world_mask)
+            selected = world_mask.numpy()[self.model.particle_world.numpy()]
+            if not selected.any():
+                return False
+            if not selected.all():
+                raise NotImplementedError("This shared-grid solver requires resetting all tissue particles together")
+        return True
+
     def reset(self, state, world_mask=None, flags=None):
         # The tissue's position and velocity come from the reset state; its deformation and damage start over.
-        self._reset_history()
+        if self._resets_particle_history(world_mask, flags):
+            self._reset_history()
 
     def step(self, state_in, state_out, control, contacts, dt):
         config = self.config

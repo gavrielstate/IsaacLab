@@ -376,6 +376,8 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         self.field_count = count
 
     def reset(self, state, world_mask=None, flags=None):
+        if not self._resets_particle_history(world_mask, flags):
+            return
         super().reset(state, world_mask, flags)
         self.bond_history.zero_()
         self.bond_damage.zero_()
