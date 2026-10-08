@@ -21,7 +21,7 @@ from scipy.spatial import cKDTree
 
 from isaaclab.utils import configclass
 
-from .explicit_mpm import SolverExplicitMultiFieldMPM, deformation_increment
+from .explicit_mpm import SolverExplicitMultiFieldMPM, deformation_increment, node_index
 
 
 def rest_bond_pairs(rest: np.ndarray, neighbor_count: int, graph: str) -> np.ndarray:
@@ -46,6 +46,76 @@ def rest_bond_pairs(rest: np.ndarray, neighbor_count: int, graph: str) -> np.nda
             row = np.concatenate([row[sectors == sector][:2] for sector in range(6)])
         edges.extend((i, int(j)) for j in row)
     return np.unique(np.sort(np.asarray(edges, dtype=np.int32), axis=1), axis=0)
+
+
+@wp.kernel
+def initialize_local_components(
+    positions: wp.array[wp.vec3],
+    origin: wp.vec3,
+    spacing: float,
+    resolution: wp.vec3i,
+    fields: int,
+    parent: wp.array[int],
+):
+    tid = wp.tid()
+    p, slot = tid // 27, tid % 27
+    q = (positions[p] - origin) / spacing
+    base = wp.vec3i(int(wp.floor(q[0] - 0.5)), int(wp.floor(q[1] - 0.5)), int(wp.floor(q[2] - 0.5)))
+    node = base + wp.vec3i(slot // 9, (slot % 9) // 3, slot % 3)
+    if node[0] >= 0 and node[1] >= 0 and node[2] >= 0:
+        if node[0] < resolution[0] and node[1] < resolution[1] and node[2] < resolution[2]:
+            parent[node_index(node, resolution) * fields + p] = p
+
+
+@wp.func
+def local_component_root(parent: wp.array[int], start: int, particle: int):
+    root = particle
+    while parent[start + root] != root:
+        root = parent[start + root]
+    return root
+
+
+@wp.kernel
+def join_local_components(
+    positions: wp.array[wp.vec3],
+    pairs: wp.array[wp.vec2i],
+    damage: wp.array[float],
+    threshold: float,
+    origin: wp.vec3,
+    spacing: float,
+    resolution: wp.vec3i,
+    fields: int,
+    parent: wp.array[int],
+    cracked: wp.array[int],
+):
+    tid = wp.tid()
+    b, slot = tid // 27, tid % 27
+    i, j = pairs[b][0], pairs[b][1]
+    qi, qj = (positions[i] - origin) / spacing, (positions[j] - origin) / spacing
+    base_i = wp.vec3i(int(wp.floor(qi[0] - 0.5)), int(wp.floor(qi[1] - 0.5)), int(wp.floor(qi[2] - 0.5)))
+    base_j = wp.vec3i(int(wp.floor(qj[0] - 0.5)), int(wp.floor(qj[1] - 0.5)), int(wp.floor(qj[2] - 0.5)))
+    node = base_i + wp.vec3i(slot // 9, (slot % 9) // 3, slot % 3)
+    if node[0] < 0 or node[1] < 0 or node[2] < 0:
+        return
+    if node[0] >= resolution[0] or node[1] >= resolution[1] or node[2] >= resolution[2]:
+        return
+    delta = node - base_j
+    if delta[0] < 0 or delta[1] < 0 or delta[2] < 0 or delta[0] > 2 or delta[1] > 2 or delta[2] > 2:
+        return
+    node_id = node_index(node, resolution)
+    if damage[b] >= threshold:
+        wp.atomic_max(cracked, node_id, 1)
+        return
+    start = node_id * fields
+    # Connectivity is restricted to particles interpolating to this node.
+    # An intact path outside its stencil cannot weld a local crack shut.
+    while True:
+        a, c = local_component_root(parent, start, i), local_component_root(parent, start, j)
+        if a == c:
+            break
+        lower, upper = wp.min(a, c), wp.max(a, c)
+        if wp.atomic_cas(parent, start + upper, upper, lower) == upper:
+            break
 
 
 @wp.kernel
@@ -470,11 +540,13 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         contact_stiffness: float = 0.0
         """Contact spring stiffness per represented area [N/m^3]; zero uses velocity contact."""
         contact_damping_ratio: float = 0.75
+        node_local_fracture: bool = False
+        """Partition each grid node using its local surviving-bond graph, refreshed every MPM substep."""
 
     def __init__(self, model, config):
         if config.fields == 0:
             config.fields = model.particle_count
-        if config.coupling_fracture and config.fields < model.particle_count:
+        if (config.coupling_fracture or config.node_local_fracture) and config.fields < model.particle_count:
             raise ValueError("GPU fracture assignment requires one field slot per particle")
         if not 0.0 < config.field_separation_damage <= 1.0:
             raise ValueError("Field separation damage must be in (0, 1]")
@@ -507,6 +579,11 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         )
         self.pairs_host = pairs
         self.bonds = wp.array(pairs, dtype=wp.vec2i, device=model.device)
+        if config.node_local_fracture:
+            self.local_parent = wp.empty(
+                int(np.prod(config.grid_resolution)) * config.fields, dtype=int, device=model.device
+            )
+            self.local_cracked = wp.zeros(int(np.prod(config.grid_resolution)), dtype=int, device=model.device)
         self.rest_delta = wp.array(rest[pairs[:, 1]] - rest[pairs[:, 0]], dtype=wp.vec3, device=model.device)
         self.bond_area = wp.array(areas, dtype=float, device=model.device)
         self.bond_history = wp.zeros(len(pairs), dtype=float, device=model.device)
@@ -587,6 +664,32 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
             inputs=[self.fragment_sizes, self.config.grain_threshold, self.elastic, self.c],
             device=device,
         )
+
+    def _prepare_grid_partition(self, positions):
+        if self.config.node_local_fracture:
+            cfg = self.config
+            self.local_cracked.zero_()
+            geometry = [wp.vec3(*cfg.grid_origin), cfg.grid_spacing, wp.vec3i(*cfg.grid_resolution), cfg.fields]
+            wp.launch(
+                initialize_local_components,
+                self.model.particle_count * 27,
+                inputs=[positions, *geometry, self.local_parent],
+                device=self.model.device,
+            )
+            wp.launch(
+                join_local_components,
+                len(self.bonds) * 27,
+                inputs=[
+                    positions,
+                    self.bonds,
+                    self.bond_damage,
+                    cfg.field_separation_damage,
+                    *geometry,
+                    self.local_parent,
+                    self.local_cracked,
+                ],
+                device=self.model.device,
+            )
 
     def check(self):
         super().check()

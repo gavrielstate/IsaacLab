@@ -474,6 +474,8 @@ def particle_to_grid(
     mass: wp.array[float],
     spacing_p: wp.array[float],
     tissue_field: wp.array[int],
+    local_parent: wp.array[int],
+    local_cracked: wp.array[int],
     origin: wp.vec3,
     resolution: wp.vec3i,
     spacing: float,
@@ -515,12 +517,17 @@ def particle_to_grid(
     wx, wy, wz = spline_weights(fx[0]), spline_weights(fx[1]), spline_weights(fx[2])
     weight = wx[a] * wy[b] * wz[k]
     delta = (wp.vec3(float(a), float(b), float(k)) - fx) * spacing
-    i = n * fields + tissue_field[p]
+    field = tissue_field[p]
+    if local_parent.shape[0] > 1 and local_cracked[n] != 0:
+        field = p
+        while local_parent[n * fields + field] != field:
+            field = local_parent[n * fields + field]
+    i = n * fields + field
     added_mass = weight * mass[p]
     old_mass = wp.atomic_add(node_mass, i, added_mass)
     if old_mass == 0.0 and added_mass > 0.0:
         slot = wp.atomic_add(field_count, n, 1)
-        field_ids[n, slot] = tissue_field[p]
+        field_ids[n, slot] = field
     wp.atomic_add(node_momentum, i, weight * (mass[p] * v[p] + affine[p] @ delta))
     if fields > 1:
         # Field contact needs each field's surface normal (mass gradient), center and extent at the node.
@@ -659,6 +666,8 @@ def grid_update(
 def grid_to_particle(
     node_velocity: wp.array[wp.vec3],
     tissue_field: wp.array[int],
+    local_parent: wp.array[int],
+    local_cracked: wp.array[int],
     fields: int,
     fragment_sizes: wp.array[int],
     grain_threshold: int,
@@ -703,7 +712,13 @@ def grid_to_particle(
                     continue
                 weight = wx[a] * wy[b] * wz[k]
                 delta = (wp.vec3(float(a), float(b), float(k)) - fx) * spacing
-                vg = node_velocity[node_index(node, resolution) * fields + first]
+                n = node_index(node, resolution)
+                field = first
+                if local_parent.shape[0] > 1 and local_cracked[n] != 0:
+                    field = p
+                    while local_parent[n * fields + field] != field:
+                        field = local_parent[n * fields + field]
+                vg = node_velocity[n * fields + field]
                 velocity += weight * vg
                 gradient += 4.0 * weight / (spacing * spacing) * wp.outer(vg, delta)
 
@@ -973,6 +988,8 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
                 outputs=[self.volume, self.spacing],
             )
             self.tissue_field = wp.zeros(count, dtype=int)
+            self.local_parent = wp.zeros(1, dtype=int)
+            self.local_cracked = wp.zeros(1, dtype=int)
             self.fragment_sizes = wp.full(count, count, dtype=int)
             self.interface = wp.zeros(count, dtype=int)
             self.yield_strain = wp.full(count, 1.0e6, dtype=float)
@@ -1103,6 +1120,7 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
                     ],
                 )
                 wp.launch(reset_count, dim=1, inputs=[self.count])
+                self._prepare_grid_partition(x)
                 if len(self.pad_body):
                     wp.launch(
                         advance_pads,
@@ -1187,6 +1205,8 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
                         model.particle_mass,
                         self.spacing,
                         self.tissue_field,
+                        self.local_parent,
+                        self.local_cracked,
                         origin,
                         resolution,
                         config.grid_spacing,
@@ -1242,6 +1262,8 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
                     inputs=[
                         self.node_velocity,
                         self.tissue_field,
+                        self.local_parent,
+                        self.local_cracked,
                         config.fields,
                         self.fragment_sizes,
                         config.grain_threshold,
@@ -1266,6 +1288,9 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
                     inputs=[model.particle_mass, self.spacing, self.pads, self.pad_half, *vessels],
                     outputs=[x, v, self.pad_impulse, self.pad_moment],
                 )
+
+    def _prepare_grid_partition(self, positions):
+        """Optional subclass hook to partition the current interpolation stencils."""
 
     def coupling_harvest_proxy_wrenches(
         self, body_local_to_proxy_global, out_body_f, *, body_qd_before, state, state_out, contacts, dt

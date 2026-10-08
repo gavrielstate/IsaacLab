@@ -22,3 +22,12 @@ and separation during cohesive softening, retaining remaining bond traction.
 Expose energy-bounded partial rebound. Add finite-stiffness Kelvin sphere contact
 with a unilateral active-spring energy audit to resist persistent overlap and
 preserve the outward response to impact. Keep existing defaults available.
+
+Expose optional node-local fracture velocity fields: restrict surviving-bond
+connectivity to each node's particle support, so connections elsewhere cannot
+weld a local crack shut. Use the global partition at nodes without damaged
+bonds to preserve intact material behavior. Rebuild the sparse connectivity
+on the GPU each MPM substep and retain global fragment labels for Gaussian
+binding and diagnostics.
+Expose the task's horizontal MPM grid half extent to retain wider debris during
+repeated impacts without changing grid spacing or the existing domain default.

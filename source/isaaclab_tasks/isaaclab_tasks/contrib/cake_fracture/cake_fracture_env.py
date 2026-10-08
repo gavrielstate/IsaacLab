@@ -5,6 +5,8 @@
 
 """Standard Lab cake task with experimental fracture-driven material fields."""
 
+import math
+
 import numpy as np
 from isaaclab_newton.physics import NewtonManager
 
@@ -33,6 +35,8 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
     bond_strength: float = 400.0
     bond_peak: float = 0.001
     bond_final: float = 0.004
+    mpm_grid_half_extent: float = 0.52
+    """Horizontal grid half extent [m]; enlarge to retain widely scattered debris."""
     fracture_fields: int = 0
     """Zero reserves one slot per particle; contact work uses only active fragments."""
     coupling_fracture: bool = False
@@ -44,6 +48,8 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
     cherry_contact_stiffness: float = 0.0
     """Finite contact spring stiffness per represented area [N/m^3]; zero uses velocity contact."""
     cherry_contact_damping_ratio: float = 0.75
+    node_local_fracture: bool = False
+    """Allow local crack opening even while intact bonds elsewhere connect the cake."""
     compression_pressure: float = 1500.0
     compression_hardening: float = 10000.0
     explicit_substep_rate: int = 4800
@@ -81,11 +87,13 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
         # a first-step collision projection of the copied asset.
         x, y, z = self.cake_position_offset
         self.cake_position_offset = (x, y, z + max(float(center[2]) + half_height - lower - z, 0.0))
+        if not math.isfinite(self.mpm_grid_half_extent) or self.mpm_grid_half_extent < 0.052:
+            raise ValueError("mpm_grid_half_extent must be finite and at least two grid cells (0.052 m)")
         cherry = UsdGeom.Sphere(stage.GetPrimAtPath("/World/Cherry/Collider"))
         self.sim.physics.solver_cfg.entries[1].solver_cfg = CakeFractureSolverCfg(
             solver_config=SolverCakeFracture.Config(
-                grid_origin=(-0.52, -0.52, -0.104),
-                grid_resolution=(41, 41, 31),
+                grid_origin=(-self.mpm_grid_half_extent, -self.mpm_grid_half_extent, -0.104),
+                grid_resolution=(math.ceil(2 * self.mpm_grid_half_extent / 0.026) + 1,) * 2 + (31,),
                 grid_spacing=0.026,
                 max_active_nodes=8192,
                 fields=self.fracture_fields,
@@ -116,6 +124,7 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
                 compression_hardening=self.compression_hardening,
                 coupling_fracture=self.coupling_fracture,
                 field_separation_damage=self.field_separation_damage,
+                node_local_fracture=self.node_local_fracture,
                 contact_restitution=self.cherry_contact_restitution,
                 contact_stiffness=self.cherry_contact_stiffness,
                 contact_damping_ratio=self.cherry_contact_damping_ratio,
