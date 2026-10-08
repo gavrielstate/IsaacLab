@@ -52,6 +52,12 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
     """Allow local crack opening even while intact bonds elsewhere connect the cake."""
     compression_pressure: float = 1500.0
     compression_hardening: float = 10000.0
+    hybrid_paste_rendering: bool = False
+    """Render cream/frosting with Newton particle surfaces and retain sponge Gaussians."""
+    paste_viscosity: float = 0.0
+    """Fracture-activated cream/frosting plastic-flow viscosity [Pa s]; zero disables."""
+    paste_surface_voxel_size: float = 0.003
+    paste_surface_threshold: float = 0.15
     explicit_substep_rate: int = 4800
 
     def __post_init__(self):
@@ -97,6 +103,7 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
                 grid_spacing=0.026,
                 max_active_nodes=8192,
                 fields=self.fracture_fields,
+                paste_field_count=2 if self.paste_viscosity > 0 else 0,
                 substep_rate=self.explicit_substep_rate,
                 coupling_rate=120,
                 ground_height=0.0,
@@ -135,16 +142,40 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
 class CakeFractureEnv(CakeSmashEnv):
     def __init__(self, cfg, render_mode=None, **kwargs):
         cfg.configure_solver()
+        self.paste_surfaces = None
+        if not math.isfinite(cfg.paste_viscosity) or cfg.paste_viscosity < 0:
+            raise ValueError("paste_viscosity must be finite and nonnegative")
         super().__init__(cfg, render_mode=render_mode, **kwargs)
+        if cfg.paste_viscosity > 0:
+            from .paste_surface import paste_groups
+
+            NewtonManager.get_solver().solver("cake").configure_paste(paste_groups(self), cfg.paste_viscosity)
+        if cfg.hybrid_paste_rendering and self._gaussian_visualizers:
+            from .paste_surface import PasteSurfaces
+
+            self.paste_surfaces = PasteSurfaces(self)
+            self._gaussian_visualizers[0].add_scene_stream(self.paste_surfaces)
 
     def _create_gaussian_stream(self, asset_path):
+        if self.cfg.hybrid_paste_rendering:
+            from .paste_surface import HybridGaussianStream
+
+            return HybridGaussianStream(self, asset_path, position_offset=self.cfg.cake_position_offset)
         return FractureGaussianStream(self, asset_path, position_offset=self.cfg.cake_position_offset)
 
     def _reset_solver(self):
         NewtonManager.get_solver().reset(NewtonManager.get_state_0(), world_mask=None, flags=None)
+        if getattr(self, "paste_surfaces", None) is not None:
+            self.paste_surfaces.invalidate()
 
     def _pre_physics_step(self, actions):
         super()._pre_physics_step(actions)
         solver = NewtonManager.get_solver().solver("cake")
         solver.update_fields()
         solver.check()
+
+    def close(self):
+        if getattr(self, "paste_surfaces", None) is not None:
+            self.paste_surfaces.close()
+            self.paste_surfaces = None
+        super().close()

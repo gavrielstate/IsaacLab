@@ -476,6 +476,7 @@ def particle_to_grid(
     tissue_field: wp.array[int],
     local_parent: wp.array[int],
     local_cracked: wp.array[int],
+    paste_fields: wp.array[int],
     origin: wp.vec3,
     resolution: wp.vec3i,
     spacing: float,
@@ -522,6 +523,8 @@ def particle_to_grid(
         field = p
         while local_parent[n * fields + field] != field:
             field = local_parent[n * fields + field]
+    if paste_fields[p] >= 0:
+        field = paste_fields[p]
     i = n * fields + field
     added_mass = weight * mass[p]
     old_mass = wp.atomic_add(node_mass, i, added_mass)
@@ -668,11 +671,13 @@ def grid_to_particle(
     tissue_field: wp.array[int],
     local_parent: wp.array[int],
     local_cracked: wp.array[int],
+    paste_fields: wp.array[int],
     fields: int,
     fragment_sizes: wp.array[int],
     grain_threshold: int,
     interface: wp.array[int],
     yield_strain: wp.array[float],
+    paste_relaxation: wp.array[float],
     tear_onset: wp.array[float],
     tear_end: wp.array[float],
     origin: wp.vec3,
@@ -718,11 +723,13 @@ def grid_to_particle(
                     field = p
                     while local_parent[n * fields + field] != field:
                         field = local_parent[n * fields + field]
+                if paste_fields[p] >= 0:
+                    field = paste_fields[p]
                 vg = node_velocity[n * fields + field]
                 velocity += weight * vg
                 gradient += 4.0 * weight / (spacing * spacing) * wp.outer(vg, delta)
 
-    if grain_threshold > 0 and fragment_sizes[p] <= grain_threshold:
+    if grain_threshold > 0 and fragment_sizes[p] <= grain_threshold and paste_fields[p] < 0:
         # A small disconnected fragment cannot resolve continuum strain. Keep
         # its APIC spin, and let contacts/bonds advance its particle centers.
         gradient = 0.5 * (gradient - wp.transpose(gradient))
@@ -740,6 +747,11 @@ def grid_to_particle(
     radius = yield_strain[p] * (1.0 + hardening * history[p]) * (1.0 - softening * damage[p])
     norm = wp.length(deviator)
     kept = wp.min(1.0, radius / wp.max(norm, 1.0e-12))
+    if paste_fields[p] >= 0 and paste_relaxation[p] > 0.0:
+        # Relax stress above the yield surface over eta / shear_modulus.
+        # The deviatoric projection dissipates elastic energy and preserves determinant.
+        retained = radius + wp.max(norm - radius, 0.0) * wp.exp(-dt / paste_relaxation[p])
+        kept = wp.min(1.0, retained / wp.max(norm, 1.0e-12))
     projected = wp.vec3(mean) + kept * deviator
     stretch = wp.vec3(wp.exp(projected[0]), wp.exp(projected[1]), wp.exp(projected[2]))
     elastic[p] = u @ wp.diag(stretch) @ wp.transpose(w)
@@ -990,6 +1002,8 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
             self.tissue_field = wp.zeros(count, dtype=int)
             self.local_parent = wp.zeros(1, dtype=int)
             self.local_cracked = wp.zeros(1, dtype=int)
+            self.paste_fields = wp.full(count, -1, dtype=int)
+            self.paste_relaxation = wp.zeros(count, dtype=float)
             self.fragment_sizes = wp.full(count, count, dtype=int)
             self.interface = wp.zeros(count, dtype=int)
             self.yield_strain = wp.full(count, 1.0e6, dtype=float)
@@ -1207,6 +1221,7 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
                         self.tissue_field,
                         self.local_parent,
                         self.local_cracked,
+                        self.paste_fields,
                         origin,
                         resolution,
                         config.grid_spacing,
@@ -1264,11 +1279,13 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
                         self.tissue_field,
                         self.local_parent,
                         self.local_cracked,
+                        self.paste_fields,
                         config.fields,
                         self.fragment_sizes,
                         config.grain_threshold,
                         self.interface,
                         self.yield_strain,
+                        self.paste_relaxation,
                         self.tear_onset,
                         self.tear_end,
                         origin,

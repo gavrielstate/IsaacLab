@@ -460,12 +460,33 @@ def display_frames(c: wp.array[wp.mat33], dt: float, frame: wp.array[wp.mat33]):
 
 
 @wp.kernel
+def activate_paste(
+    pairs: wp.array[wp.vec2i],
+    damage: wp.array[float],
+    threshold: float,
+    targets: wp.array[int],
+    fields: wp.array[int],
+    volume: wp.array[float],
+    reference_volume: wp.array[float],
+):
+    i = wp.tid()
+    if damage[i] >= threshold:
+        for endpoint in range(2):
+            p = pairs[i][endpoint]
+            if targets[p] >= 0:
+                previous = wp.atomic_cas(fields, p, -1, targets[p])
+                if previous == -1:
+                    reference_volume[p] = volume[p]
+
+
+@wp.kernel
 def plastic_compaction(
     cap: float,
     hardening: float,
     young: wp.array[float],
     poisson: wp.array[float],
     initial_volume: wp.array[float],
+    paste_fields: wp.array[int],
     plastic_log_volume: wp.array[float],
     elastic: wp.array[wp.mat33],
     volume: wp.array[float],
@@ -473,6 +494,8 @@ def plastic_compaction(
 ):
     """Pressure cap absorbs pore collapse; hardening limits continued densification."""
     i = wp.tid()
+    if paste_fields[i] >= 0:
+        return
     f = elastic[i]
     log_volume = wp.log(wp.max(wp.determinant(f), 1.0e-8))
     bulk_modulus = young[i] / (3.0 * (1.0 - 2.0 * poisson[i]))
@@ -508,9 +531,15 @@ def grain_skin_frames(
 
 
 @wp.kernel
-def relax_grains(sizes: wp.array[int], threshold: int, elastic: wp.array[wp.mat33], c: wp.array[wp.mat33]):
+def relax_grains(
+    sizes: wp.array[int],
+    threshold: int,
+    paste_fields: wp.array[int],
+    elastic: wp.array[wp.mat33],
+    c: wp.array[wp.mat33],
+):
     i = wp.tid()
-    if sizes[i] <= threshold:
+    if sizes[i] <= threshold and paste_fields[i] < 0:
         u, s, v = wp.svd3(elastic[i])
         elastic[i] = u @ wp.transpose(v)
         c[i] = 0.5 * (c[i] - wp.transpose(c[i]))
@@ -519,6 +548,8 @@ def relax_grains(sizes: wp.array[int], threshold: int, elastic: wp.array[wp.mat3
 class SolverCakeFracture(SolverExplicitMultiFieldMPM):
     @dataclass
     class Config(SolverExplicitMultiFieldMPM.Config):
+        paste_field_count: int = 0
+        """Reserve additional shared velocity fields for yielding paste components."""
         bond_strength: float = 600.0
         bond_peak: float = 0.002
         bond_final: float = 0.006
@@ -545,7 +576,9 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
 
     def __init__(self, model, config):
         if config.fields == 0:
-            config.fields = model.particle_count
+            config.fields = model.particle_count + config.paste_field_count
+        if config.fields < model.particle_count + config.paste_field_count and config.paste_field_count:
+            raise ValueError("Paste fields require particle_count + paste_field_count slots")
         if (config.coupling_fracture or config.node_local_fracture) and config.fields < model.particle_count:
             raise ValueError("GPU fracture assignment requires one field slot per particle")
         if not 0.0 < config.field_separation_damage <= 1.0:
@@ -604,12 +637,29 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
             np.maximum(model.mpm.yield_stress.numpy() / model.mpm.young_modulus.numpy(), 0.0001).astype(np.float32)
         )
         self.initial_volume = wp.clone(self.volume)
+        self.paste_reference_volume = wp.clone(self.volume)
+        self.paste_targets = wp.full(model.particle_count, -1, dtype=int, device=model.device)
         self.plastic_log_volume = wp.zeros(model.particle_count, dtype=float, device=model.device)
         self.component_parent = wp.zeros(model.particle_count, dtype=int, device=model.device)
         self.component_counts = wp.zeros(model.particle_count, dtype=int, device=model.device)
         self.fragment_count = 1
         self.field_count = 1
         self.update_fields()
+
+    def configure_paste(self, groups, viscosity):
+        """Reserve paste targets before capture; broken bonds activate their material fields."""
+        if len(groups) != self.config.paste_field_count or viscosity <= 0.0:
+            raise ValueError("Paste groups must match the reserved fields and viscosity must be positive")
+        fields = np.full(self.model.particle_count, -1, dtype=np.int32)
+        relaxation = np.zeros(self.model.particle_count, dtype=np.float32)
+        young, poisson = self.model.mpm.young_modulus.numpy(), self.model.mpm.poisson_ratio.numpy()
+        for kind, ids in enumerate(groups):
+            if np.any(fields[ids] >= 0):
+                raise ValueError("Paste material groups overlap")
+            fields[ids] = self.model.particle_count + kind
+            relaxation[ids] = viscosity / (young[ids] / (2 * (1 + poisson[ids])))
+        self.paste_targets.assign(fields)
+        self.paste_relaxation.assign(relaxation)
 
     def update_fields(self):
         if self.config.coupling_fracture:
@@ -630,7 +680,7 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         wp.launch(
             relax_grains,
             dim=self.model.particle_count,
-            inputs=[self.fragment_sizes, self.config.grain_threshold, self.elastic, self.c],
+            inputs=[self.fragment_sizes, self.config.grain_threshold, self.paste_fields, self.elastic, self.c],
             device=self.model.device,
         )
         self.fragment_count = count
@@ -661,7 +711,7 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         wp.launch(
             relax_grains,
             count,
-            inputs=[self.fragment_sizes, self.config.grain_threshold, self.elastic, self.c],
+            inputs=[self.fragment_sizes, self.config.grain_threshold, self.paste_fields, self.elastic, self.c],
             device=device,
         )
 
@@ -702,6 +752,8 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         if not self._resets_particle_history(world_mask, flags):
             return
         super().reset(state, world_mask, flags)
+        self.paste_fields.fill_(-1)
+        wp.copy(self.paste_reference_volume, self.initial_volume)
         self.bond_history.zero_()
         self.contact_energy_failures.zero_()
         self.bond_damage.zero_()
@@ -757,6 +809,21 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
                 ],
                 device=self.model.device,
             )
+            if cfg.paste_field_count:
+                wp.launch(
+                    activate_paste,
+                    len(self.bonds),
+                    inputs=[
+                        self.bonds,
+                        self.bond_damage,
+                        cfg.field_separation_damage,
+                        self.paste_targets,
+                        self.paste_fields,
+                        self.volume,
+                        self.paste_reference_volume,
+                    ],
+                    device=self.model.device,
+                )
             self.local_impulse.zero_()
             self.local_moment.zero_()
             self.contact_work.zero_()
@@ -856,6 +923,7 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
                         self.model.mpm.young_modulus,
                         self.model.mpm.poisson_ratio,
                         self.initial_volume,
+                        self.paste_fields,
                         self.plastic_log_volume,
                         self.elastic,
                         self.volume,
