@@ -54,6 +54,10 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
     """Allow local crack opening even while intact bonds elsewhere connect the cake."""
     compression_pressure: float = 1500.0
     compression_hardening: float = 10000.0
+    gaussian_skinning_jacobian: bool = False
+    """Include spatial weight derivatives in Gaussian covariance transport; physics is unchanged."""
+    gaussian_max_stretch: float = 3.0
+    """Maximum singular value of the corrected Gaussian skinning derivative, relative to rest."""
     hybrid_paste_rendering: bool = False
     """Render cream/frosting with Newton particle surfaces and retain sponge Gaussians."""
     paste_viscosity: float = 0.0
@@ -64,6 +68,8 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
+        if not math.isfinite(self.gaussian_max_stretch) or self.gaussian_max_stretch < 1.0:
+            raise ValueError("gaussian_max_stretch must be finite and at least 1")
         viz = self.sim.default_visualizer_cfg
         viz.eye = (0.52, -0.68, 0.58)
         viz.lookat = (0.0, 0.0, 0.31)

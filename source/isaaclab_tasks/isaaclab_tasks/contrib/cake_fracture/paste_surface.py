@@ -39,7 +39,14 @@ class HybridGaussianStream(FractureGaussianStream):
         self._keep = ~np.isin(self.asset["regions"], excluded)
         for key, value in self.asset.items():
             self.asset[key] = value[self._keep]
-        return FragmentBinding(self.asset, rest, physical_regions, self.solver)
+        return FragmentBinding(
+            self.asset,
+            rest,
+            physical_regions,
+            self.solver,
+            skinning_jacobian=self.env.cfg.gaussian_skinning_jacobian,
+            max_stretch=self.env.cfg.gaussian_max_stretch,
+        )
 
     def author(self, stage):
         super().author(stage)
