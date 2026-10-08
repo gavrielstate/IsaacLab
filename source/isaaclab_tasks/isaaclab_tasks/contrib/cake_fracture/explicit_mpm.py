@@ -599,16 +599,21 @@ def grid_update(
         node_velocity[i] = wp.vec3(0.0)
         if node_mass[i] > 1.0e-14:
             node_velocity[i] = (node_momentum[i] / node_mass[i] + dt * gravity) * wp.exp(-damping * dt)
+            if mass_gradient.shape[0] > 1:
+                # These scratch accumulators are cleared before the next transfer.
+                # Cache normalized geometry once instead of dividing it for every pair.
+                mass_gradient[i] = mass_gradient[i] / node_mass[i]
+                mass_moment[i] = mass_moment[i] / node_mass[i]
     # One thread owns all fields of a node. Each pairwise projection removes approaching relative motion and conserves
     # momentum; separating fields move freely.
     for sweep in range(3):
         for f in range(fields):
             i = n * field_ids.shape[1] + field_ids[n, f]
             mass_i = node_mass[i]
-            if mass_i <= 1.0e-14:
+            if mass_i <= 1.0e-14 or fields < 2:
                 continue
-            gradient_i = mass_gradient[i] / mass_i
-            center_i = mass_moment[i] / mass_i
+            gradient_i = mass_gradient[i]
+            center_i = mass_moment[i]
             velocity_i = node_velocity[i]
             for g in range(f + 1, fields):
                 k = n * field_ids.shape[1] + field_ids[n, g]
@@ -624,12 +629,16 @@ def grid_update(
                             separated = True
                     if separated:
                         continue
-                normal = gradient_i - mass_gradient[k] / mass_k
-                offset = mass_moment[k] / mass_k - center_i
+                normal = gradient_i - mass_gradient[k]
+                offset = mass_moment[k] - center_i
                 if wp.length_sq(normal) < 1.0e-10:
                     normal = offset
                 if wp.dot(normal, offset) < 0.0:
                     normal = -normal
+                # Normalization cannot change the sign of closing velocity.
+                # Separating pairs need no gap, friction or impulse calculation.
+                if wp.dot(relative, normal) >= 0.0:
+                    continue
                 normal = wp.normalize(normal)
                 closing = wp.dot(relative, normal)
                 # Overlapping kernel support is not contact: estimate the gap from the fields' particle extents, with
