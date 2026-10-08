@@ -31,6 +31,8 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
     """Plastic log-volume collapse at onset of sponge cohesive damage."""
     crush_final: float = 0.0
     """Plastic log-volume collapse at complete damage; zero disables."""
+    grain_deformation: float = 0.0
+    """Bounded affine strain for unresolved sponge grains; zero retains rigid grains."""
     grain_threshold: int = 6
     bond_strength: float = 400.0
     bond_peak: float = 0.001
@@ -122,6 +124,7 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
                 bond_graph=self.bond_graph,
                 neighbor_count=self.bond_neighbors,
                 grain_threshold=self.grain_threshold,
+                grain_deformation=self.grain_deformation,
                 bond_strength=self.bond_strength,
                 bond_peak=self.bond_peak,
                 bond_final=self.bond_final,

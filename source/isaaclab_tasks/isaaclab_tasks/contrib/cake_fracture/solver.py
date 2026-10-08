@@ -514,19 +514,29 @@ def grain_skin_frames(
     sizes: wp.array[int],
     compaction: wp.array[float],
     threshold: int,
+    deformation: float,
     skin_frames: wp.array[wp.mat33],
 ):
-    """Unresolved small grains retain their rest shape, rotation, and pore volume.
+    """Bound small-grain distortion while preserving rotation and physical pore volume.
 
-    A handful of particles cannot resolve a continuum deformation reliably.
-    Their Gaussian support therefore uses the measured rotation and physical
-    plastic volume, rather than an accumulating APIC extrapolation.
+    Zero deformation retains the rigid-grain fallback. Nonzero deformation
+    permits bounded deviatoric strain rather than accumulating APIC extrapolation.
+    This transport bound is not a claim that one particle resolves a continuum.
     """
     i = wp.tid()
     f = frames[i]
     if sizes[i] <= threshold:
         u, s, v = wp.svd3(f)
-        f = wp.exp(-compaction[i] / 3.0) * u @ wp.transpose(v)
+        stretch = wp.vec3(
+            wp.log(wp.max(wp.abs(s[0]), 1.0e-6)),
+            wp.log(wp.max(wp.abs(s[1]), 1.0e-6)),
+            wp.log(wp.max(wp.abs(s[2]), 1.0e-6)),
+        )
+        mean = (stretch[0] + stretch[1] + stretch[2]) / 3.0
+        deviator = stretch - wp.vec3(mean)
+        scale = wp.min(1.0, 0.35 * deformation / wp.max(wp.length(deviator), 1.0e-6))
+        logs = -wp.vec3(compaction[i] / 3.0) + scale * deviator
+        f = u @ wp.diag(wp.vec3(wp.exp(logs[0]), wp.exp(logs[1]), wp.exp(logs[2]))) @ wp.transpose(v)
     skin_frames[i] = f
 
 
@@ -534,12 +544,13 @@ def grain_skin_frames(
 def relax_grains(
     sizes: wp.array[int],
     threshold: int,
+    deformation: float,
     paste_fields: wp.array[int],
     elastic: wp.array[wp.mat33],
     c: wp.array[wp.mat33],
 ):
     i = wp.tid()
-    if sizes[i] <= threshold and paste_fields[i] < 0:
+    if sizes[i] <= threshold and paste_fields[i] < 0 and deformation == 0.0:
         u, s, v = wp.svd3(elastic[i])
         elastic[i] = u @ wp.transpose(v)
         c[i] = 0.5 * (c[i] - wp.transpose(c[i]))
@@ -575,6 +586,8 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         """Partition each grid node using its local surviving-bond graph, refreshed every MPM substep."""
 
     def __init__(self, model, config):
+        if not 0.0 <= config.grain_deformation <= 1.0:
+            raise ValueError("grain_deformation must be in [0, 1]")
         if config.fields == 0:
             config.fields = model.particle_count + config.paste_field_count
         if config.fields < model.particle_count + config.paste_field_count and config.paste_field_count:
@@ -680,7 +693,14 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         wp.launch(
             relax_grains,
             dim=self.model.particle_count,
-            inputs=[self.fragment_sizes, self.config.grain_threshold, self.paste_fields, self.elastic, self.c],
+            inputs=[
+                self.fragment_sizes,
+                self.config.grain_threshold,
+                self.config.grain_deformation,
+                self.paste_fields,
+                self.elastic,
+                self.c,
+            ],
             device=self.model.device,
         )
         self.fragment_count = count
@@ -711,7 +731,14 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         wp.launch(
             relax_grains,
             count,
-            inputs=[self.fragment_sizes, self.config.grain_threshold, self.paste_fields, self.elastic, self.c],
+            inputs=[
+                self.fragment_sizes,
+                self.config.grain_threshold,
+                self.config.grain_deformation,
+                self.paste_fields,
+                self.elastic,
+                self.c,
+            ],
             device=device,
         )
 
@@ -954,7 +981,14 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         wp.launch(
             grain_skin_frames,
             dim=self.model.particle_count,
-            inputs=[self.frames, self.fragment_sizes, self.plastic_log_volume, cfg.grain_threshold, self.skin_frames],
+            inputs=[
+                self.frames,
+                self.fragment_sizes,
+                self.plastic_log_volume,
+                cfg.grain_threshold,
+                cfg.grain_deformation,
+                self.skin_frames,
+            ],
             device=self.model.device,
         )
 

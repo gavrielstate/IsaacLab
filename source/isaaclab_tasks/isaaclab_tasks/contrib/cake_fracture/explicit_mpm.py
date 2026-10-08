@@ -675,6 +675,7 @@ def grid_to_particle(
     fields: int,
     fragment_sizes: wp.array[int],
     grain_threshold: int,
+    grain_deformation: float,
     interface: wp.array[int],
     yield_strain: wp.array[float],
     paste_relaxation: wp.array[float],
@@ -730,9 +731,10 @@ def grid_to_particle(
                 gradient += 4.0 * weight / (spacing * spacing) * wp.outer(vg, delta)
 
     if grain_threshold > 0 and fragment_sizes[p] <= grain_threshold and paste_fields[p] < 0:
-        # A small disconnected fragment cannot resolve continuum strain. Keep
-        # its APIC spin, and let contacts/bonds advance its particle centers.
-        gradient = 0.5 * (gradient - wp.transpose(gradient))
+        # Unresolved fragments retain APIC spin and an opt-in fraction of
+        # symmetric strain; the task separately bounds their Gaussian distortion.
+        spin = 0.5 * (gradient - wp.transpose(gradient))
+        gradient = spin + grain_deformation * (gradient - spin)
         ru, rs, rv = wp.svd3(elastic[p])
         elastic[p] = ru @ wp.transpose(rv)
 
@@ -907,8 +909,10 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
         """Grid spacing [m]."""
         max_active_nodes: int = 32768
         """Capacity of the active-node list; overflows are counted in :attr:`errors`."""
+        grain_deformation: float = 0.0
+        """Fraction of symmetric APIC strain retained in unresolved fragments."""
         grain_threshold: int = 0
-        """Disable unresolved affine strain for fragments no larger than this; zero disables."""
+        """Regularize affine strain for fragments no larger than this; zero disables."""
         fields: int = 1
         """Number of separate velocity fields (bodies of tissue in contact)."""
         substep_rate: int = 6000
@@ -1283,6 +1287,7 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
                         config.fields,
                         self.fragment_sizes,
                         config.grain_threshold,
+                        config.grain_deformation,
                         self.interface,
                         self.yield_strain,
                         self.paste_relaxation,

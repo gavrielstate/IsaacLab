@@ -10,7 +10,7 @@ import warp as wp
 from isaaclab_newton.physics import NewtonManager
 from newton.geometry import ParticleSurface
 
-from pxr import Sdf, Usd, UsdGeom, UsdShade
+from pxr import Sdf, Usd, UsdGeom, UsdShade, Vt
 
 from .gaussian_binding import FractureGaussianStream, FragmentBinding
 
@@ -78,7 +78,32 @@ class PasteSurfaces:
         self.paths = ["/World/CakePaste/Cream", "/World/CakePaste/Frosting"]
         count = NewtonManager.get_model().particle_count
         self.radii = wp.empty(count, dtype=float, device=env.device)
-        for ids in paste_groups(env):
+        self.ids = paste_groups(env)
+        # Degree-zero radiance provides a material-specific source colour rather
+        # than an unrelated beige/white replacement for the chocolate icing.
+        source = env.gaussian_stream.source.GetPrimAtPath("/World/Cake")
+        regions = np.asarray(source.GetAttribute("cake:component_ids").Get())
+        coefficients = np.asarray(source.GetAttribute("radiance:sphericalHarmonicsCoefficients").Get())
+        if int(source.GetAttribute("radiance:sphericalHarmonicsDegree").Get()) != 0:
+            raise ValueError("Paste colour extraction currently requires degree-zero source radiance")
+        rgb = np.clip(0.5 + 0.28209479177387814 * coefficients, 0.0, 1.0)
+        colors = np.zeros((count, 3), np.float32)
+        for component, name in enumerate(env.component_names):
+            matches = [r for path, r in NewtonManager.backend.particle_ranges.items() if f"/CakeLayers/{name}/" in path]
+            start, size = matches[0]
+            samples = rgb[regions == component]
+            if len(samples) == 0:
+                raise ValueError(f"Missing source colour samples for {name}")
+            colors[start : start + size] = np.median(samples, axis=0)
+        self.material_colors = []
+        for ids in self.ids:
+            if len(ids) == 0:
+                raise ValueError("Hybrid cake surfaces require nonempty cream and frosting particle groups")
+            srgb = np.median(colors[ids], axis=0)
+            # Match source display colours with linear RGB mesh reflectance.
+            linear = np.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
+            self.material_colors.append(tuple(linear.tolist()))
+        for ids in self.ids:
             flags = np.zeros(count, np.int32)
             flags[ids] = 1
             self.flags.append(wp.array(flags, dtype=int, device=env.device))
@@ -100,28 +125,38 @@ class PasteSurfaces:
 
     def author(self, stage):
         UsdGeom.Xform.Define(stage, "/World/CakePaste")
+        self.meshes = self._extract_meshes()
         for kind, path in enumerate(self.paths):
             mesh = UsdGeom.Mesh.Define(stage, path)
             mesh.CreateSubdivisionSchemeAttr("none")
             mesh.CreateDoubleSidedAttr(True)
             mesh.SetNormalsInterpolation("vertex")
-            for attr in (
-                mesh.CreatePointsAttr(),
-                mesh.CreateNormalsAttr(),
-                mesh.CreateFaceVertexCountsAttr(),
-                mesh.CreateFaceVertexIndicesAttr(),
+            _, points, indices, normals, counts = self.meshes[kind]
+            # Author valid initial geometry so RTX establishes its material binding
+            # before subsequent retained topology updates.
+            for attr, values in (
+                (mesh.CreatePointsAttr(), Vt.Vec3fArray.FromNumpy(points.numpy())),
+                (mesh.CreateNormalsAttr(), Vt.Vec3fArray.FromNumpy(normals.numpy())),
+                (mesh.CreateFaceVertexCountsAttr(), Vt.IntArray.FromNumpy(counts.numpy())),
+                (mesh.CreateFaceVertexIndicesAttr(), Vt.IntArray.FromNumpy(indices.numpy())),
             ):
                 for time in (Usd.TimeCode.Default(), Usd.TimeCode(0), Usd.TimeCode(1)):
-                    attr.Set([], time)
+                    attr.Set(values, time)
             material = UsdShade.Material.Define(stage, path + "Material")
             shader = UsdShade.Shader.Define(stage, path + "Material/Shader")
             shader.CreateIdAttr("UsdPreviewSurface")
-            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
-                (0.93, 0.85, 0.67) if kind == 0 else (0.78, 0.59, 0.43)
-            )
+            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(self.material_colors[kind])
             shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.35 if kind == 0 else 0.55)
             shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
             material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+            mdl = UsdShade.Shader.Define(stage, path + "Material/MDL")
+            mdl.SetSourceAsset(Sdf.AssetPath("OmniPBR.mdl"), "mdl")
+            mdl.SetSourceAssetSubIdentifier("OmniPBR", "mdl")
+            mdl.CreateInput("diffuse_color_constant", Sdf.ValueTypeNames.Color3f).Set(self.material_colors[kind])
+            mdl.CreateInput("reflection_roughness_constant", Sdf.ValueTypeNames.Float).Set(0.55)
+            output = mdl.CreateOutput("out", Sdf.ValueTypeNames.Token)
+            output.SetRenderType("material")
+            material.CreateSurfaceOutput("mdl").ConnectToSource(output)
             UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim()).Bind(material)
 
     def bind(self, renderer):
@@ -130,6 +165,9 @@ class PasteSurfaces:
         self.renderer = renderer
         try:
             for path in self.paths:
+                # Reapply after scene construction: this RTX build otherwise
+                # leaves retained dynamic meshes on its pale fallback material.
+                renderer.write_array_attribute([path], "material:binding", [[path + "Material"]])
                 self.bindings.append({})
                 for name, dtype, shape in (
                     ("points", "float32", (3,)),
@@ -144,12 +182,7 @@ class PasteSurfaces:
             self.release_renderer()
             raise
 
-    def publish(self, renderer):
-        from ovrtx import DataAccess
-
-        step = self.env.sim.get_physics_step_count()
-        if step == self.last_step:
-            return
+    def _extract_meshes(self):
         solver = NewtonManager.get_solver().solver("cake")
         wp.launch(volume_radius, len(self.radii), inputs=[solver.volume], outputs=[self.radii], device=self.env.device)
         meshes = []
@@ -162,7 +195,18 @@ class PasteSurfaces:
                 normals = wp.empty(0, dtype=wp.vec3, device=self.env.device)
             counts = wp.full(len(indices) // 3, 3, dtype=int, device=self.env.device)
             self.triangle_counts[kind] = len(counts)
-            wp.synchronize_device(self.env.device)
+            meshes.append((mesh, points, indices, normals, counts))
+        wp.synchronize_device(self.env.device)
+        return meshes
+
+    def publish(self, renderer):
+        from ovrtx import DataAccess
+
+        step = self.env.sim.get_physics_step_count()
+        if step == self.last_step:
+            return
+        meshes = self._extract_meshes()
+        for kind, (_, points, indices, normals, counts) in enumerate(meshes):
             for name, value in (
                 ("points", points),
                 ("normals", normals),
@@ -170,7 +214,6 @@ class PasteSurfaces:
                 ("faceVertexCounts", counts),
             ):
                 self.bindings[kind][name].write([value], data_access=DataAccess.ASYNC)
-            meshes.append((mesh, points, indices, normals, counts))
         self.meshes = meshes
         self.last_step = step
 
@@ -178,7 +221,9 @@ class PasteSurfaces:
         """Read back retained mesh arrays after finishing the renderer frame."""
         for path, mesh in zip(self.paths, self.meshes, strict=True):
             for name, expected in zip(
-                ("points", "faceVertexIndices", "normals", "faceVertexCounts"), mesh[1:], strict=True
+                ("points", "faceVertexIndices", "normals", "faceVertexCounts"),
+                mesh[1:],
+                strict=True,
             ):
                 restored = self.renderer.read_array_attribute(attribute_name=name, prim_paths=[path])
                 actual = np.from_dlpack(restored[path]).reshape(expected.numpy().shape)
