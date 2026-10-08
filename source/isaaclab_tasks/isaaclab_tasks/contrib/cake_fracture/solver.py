@@ -130,12 +130,15 @@ def sphere_contact(
     angular: wp.array[wp.vec3],
     radius: float,
     sphere_mass: float,
-    dt: float,
     v: wp.array[wp.vec3],
+    impulse: wp.array[wp.vec3],
     reaction: wp.array[wp.vec3],
     moment: wp.array[wp.vec3],
+    work: wp.array[float],
 ):
+    """Propose dissipative velocity impulses; overlap never creates a target speed."""
     i = wp.tid()
+    impulse[i] = wp.vec3(0.0)
     offset = q[i] - center[0]
     distance = wp.length(offset)
     gap = distance - radius - 0.5 * spacing[i]
@@ -143,13 +146,47 @@ def sphere_contact(
         n = offset / distance
         relative = v[i] - velocity[0] - wp.cross(angular[0], offset)
         normal_speed = wp.dot(relative, n)
-        impulse = wp.max(-normal_speed - 0.08 * gap / dt, 0.0) / (1.0 / mass[i] + 1.0 / sphere_mass)
+        normal_impulse = wp.max(-normal_speed, 0.0) / (1.0 / mass[i] + 1.0 / sphere_mass)
         tangent = relative - normal_speed * n
-        friction = wp.min(0.3 * impulse, mass[i] * wp.length(tangent))
-        change = impulse * n - friction * tangent / wp.max(wp.length(tangent), 1.0e-9)
-        v[i] += change / mass[i]
+        friction = wp.min(0.3 * normal_impulse, mass[i] * wp.length(tangent))
+        change = normal_impulse * n - friction * tangent / wp.max(wp.length(tangent), 1.0e-9)
+        impulse[i] = change
         wp.atomic_add(reaction, 0, -change)
         wp.atomic_add(moment, 0, wp.cross(offset, -change))
+        wp.atomic_add(work, 0, wp.dot(relative, change))
+        wp.atomic_add(work, 1, 0.5 * wp.length_sq(change) / mass[i])
+
+
+@wp.kernel
+def sphere_contact_scale(
+    reaction: wp.array[wp.vec3],
+    moment: wp.array[wp.vec3],
+    work: wp.array[float],
+    sphere_mass: float,
+    radius: float,
+    scale: wp.array[float],
+):
+    """Account for the shared rigid body's simultaneous linear/angular response.
+
+    Contact kinetic work is a*A + a*a*B. Its minimum over [0, 1]
+    is nonpositive because proposed impulses oppose relative motion (A <= 0).
+    """
+    quadratic = work[1] + 0.5 * wp.length_sq(reaction[0]) / sphere_mass
+    quadratic += 0.5 * wp.length_sq(moment[0]) / (0.4 * sphere_mass * radius * radius)
+    alpha = float(0.0)
+    if quadratic > 0.0:
+        alpha = wp.clamp(-work[0] / (2.0 * quadratic), 0.0, 1.0)
+    scale[0] = alpha
+    reaction[0] *= alpha
+    moment[0] *= alpha
+
+
+@wp.kernel
+def apply_sphere_contact(
+    impulse: wp.array[wp.vec3], mass: wp.array[float], scale: wp.array[float], velocity: wp.array[wp.vec3]
+):
+    i = wp.tid()
+    velocity[i] += scale[0] * impulse[i] / mass[i]
 
 
 @wp.kernel
@@ -303,6 +340,9 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
             np.broadcast_to(np.eye(3, dtype=np.float32), (len(rest), 3, 3)).copy(), dtype=wp.mat33, device=model.device
         )
         self.skin_frames = wp.clone(self.frames)
+        self.contact_impulse = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
+        self.contact_work = wp.zeros(2, dtype=float, device=model.device)
+        self.contact_scale = wp.zeros(1, dtype=float, device=model.device)
         for name in ("center", "velocity", "angular", "local_impulse", "local_moment", "impulse", "moment"):
             setattr(self, name, wp.zeros(1, dtype=wp.vec3, device=model.device))
         # Match the authored shear yield approximately; explicit and implicit laws differ.
@@ -389,6 +429,7 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
             )
             self.local_impulse.zero_()
             self.local_moment.zero_()
+            self.contact_work.zero_()
             wp.launch(
                 sphere_contact,
                 dim=self.model.particle_count,
@@ -401,11 +442,26 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
                     self.angular,
                     cfg.cherry_radius,
                     cfg.cherry_mass,
-                    h,
                     state_in.particle_qd,
+                    self.contact_impulse,
                     self.local_impulse,
                     self.local_moment,
+                    self.contact_work,
                 ],
+                device=self.model.device,
+            )
+            wp.launch(
+                sphere_contact_scale,
+                dim=1,
+                inputs=[self.local_impulse, self.local_moment, self.contact_work, cfg.cherry_mass, cfg.cherry_radius],
+                outputs=[self.contact_scale],
+                device=self.model.device,
+            )
+            wp.launch(
+                apply_sphere_contact,
+                dim=self.model.particle_count,
+                inputs=[self.contact_impulse, self.model.particle_mass, self.contact_scale],
+                outputs=[state_in.particle_qd],
                 device=self.model.device,
             )
             super().step(state_in, state_out, control, contacts, h)

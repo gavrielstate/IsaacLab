@@ -9,3 +9,7 @@ damage and field-contact AABB rejection for material sampling experiments.
 Accelerate experimental cake fracture contact with node-major grid-field
 storage, cached per-field properties and small-grid CUDA scheduling. Preserve
 material settings, contact projection order and the 936-particle input.
+
+Prevent cherry-contact energy injection by removing velocity penetration bias
+and bounding simultaneous contact impulses using their total linear/angular
+kinetic work. Preserve equal/opposite momentum transfer.
