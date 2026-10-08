@@ -35,6 +35,15 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
     bond_final: float = 0.004
     fracture_fields: int = 0
     """Zero reserves one slot per particle; contact work uses only active fragments."""
+    coupling_fracture: bool = False
+    """Update fragment velocity fields at 120 Hz rather than the 30 Hz task boundary."""
+    field_separation_damage: float = 0.9999
+    """Damage threshold for separating velocity fields while retaining cohesive bond traction."""
+    cherry_contact_restitution: float = 0.0
+    """Aggregate particle/cherry rebound, bounded by the incoming contact kinetic energy."""
+    cherry_contact_stiffness: float = 0.0
+    """Finite contact spring stiffness per represented area [N/m^3]; zero uses velocity contact."""
+    cherry_contact_damping_ratio: float = 0.75
     compression_pressure: float = 1500.0
     compression_hardening: float = 10000.0
     explicit_substep_rate: int = 4800
@@ -105,6 +114,11 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
                 cherry_radius=float(cherry.GetRadiusAttr().Get()),
                 compression_pressure=self.compression_pressure,
                 compression_hardening=self.compression_hardening,
+                coupling_fracture=self.coupling_fracture,
+                field_separation_damage=self.field_separation_damage,
+                contact_restitution=self.cherry_contact_restitution,
+                contact_stiffness=self.cherry_contact_stiffness,
+                contact_damping_ratio=self.cherry_contact_damping_ratio,
             )
         )
 

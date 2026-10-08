@@ -16,3 +16,9 @@ kinetic work. Preserve equal/opposite momentum transfer.
 
 Preserve cake damage, plastic compaction and deformation history when moving
 only the cherry; clear material history only on a particle/episode reset.
+
+Expose optional GPU connected-component field assignment at the coupling rate
+and separation during cohesive softening, retaining remaining bond traction.
+Expose energy-bounded partial rebound. Add finite-stiffness Kelvin sphere contact
+with a unilateral active-spring energy audit to resist persistent overlap and
+preserve the outward response to impact. Keep existing defaults available.

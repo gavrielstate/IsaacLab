@@ -6,7 +6,7 @@
 """Fracture graph, field allocation, and reacting rigid-sphere contact.
 
 This experimental solver separates connected components of an irreversible
-rest-neighbor bond graph. Field labels change only at the uncaptured task-step
+rest-neighbor bond graph. Field assignment can run on the GPU at each coupling
 boundary. No crack plane or time-dependent break schedule is prescribed.
 """
 
@@ -46,6 +46,52 @@ def rest_bond_pairs(rest: np.ndarray, neighbor_count: int, graph: str) -> np.nda
             row = np.concatenate([row[sectors == sector][:2] for sector in range(6)])
         edges.extend((i, int(j)) for j in row)
     return np.unique(np.sort(np.asarray(edges, dtype=np.int32), axis=1), axis=0)
+
+
+@wp.kernel
+def initialize_components(parent: wp.array[int], sizes: wp.array[int]):
+    i = wp.tid()
+    parent[i] = i
+    sizes[i] = 0
+
+
+@wp.func
+def component_root(parent: wp.array[int], i: int):
+    root = i
+    while parent[root] != root:
+        root = parent[root]
+    return root
+
+
+@wp.kernel
+def join_components(pairs: wp.array[wp.vec2i], damage: wp.array[float], threshold: float, parent: wp.array[int]):
+    b = wp.tid()
+    if damage[b] < threshold:
+        i, j = pairs[b][0], pairs[b][1]
+        while True:
+            a, c = component_root(parent, i), component_root(parent, j)
+            if a == c:
+                break
+            lower, upper = wp.min(a, c), wp.max(a, c)
+            # Only replace a root. Descending parent indices prevent cycles,
+            # and retrying a lost race avoids dropping a surviving bond.
+            previous = wp.atomic_cas(parent, upper, upper, lower)
+            if previous == upper:
+                break
+
+
+@wp.kernel
+def label_components(parent: wp.array[int], fields: wp.array[int], sizes: wp.array[int]):
+    i = wp.tid()
+    root = component_root(parent, i)
+    fields[i] = root
+    wp.atomic_add(sizes, root, 1)
+
+
+@wp.kernel
+def component_sizes(fields: wp.array[int], sizes: wp.array[int], particle_sizes: wp.array[int]):
+    i = wp.tid()
+    particle_sizes[i] = sizes[fields[i]]
 
 
 @wp.kernel
@@ -158,24 +204,134 @@ def sphere_contact(
 
 
 @wp.kernel
+def sphere_compliant_contact(
+    q: wp.array[wp.vec3],
+    mass: wp.array[float],
+    spacing: wp.array[float],
+    center: wp.array[wp.vec3],
+    velocity: wp.array[wp.vec3],
+    angular: wp.array[wp.vec3],
+    radius: float,
+    sphere_mass: float,
+    dt: float,
+    stiffness: float,
+    damping_ratio: float,
+    v: wp.array[wp.vec3],
+    impulse: wp.array[wp.vec3],
+    reaction: wp.array[wp.vec3],
+    moment: wp.array[wp.vec3],
+    work: wp.array[float],
+):
+    """Implicit Kelvin contact: finite spring energy, damping, and Coulomb friction."""
+    i = wp.tid()
+    impulse[i] = wp.vec3(0.0)
+    offset = q[i] - center[0]
+    distance = wp.length(offset)
+    if distance > 1.0e-8:
+        n = offset / distance
+        depth = wp.max(radius + 0.5 * spacing[i] - distance, 0.0)
+        relative = v[i] - velocity[0] - wp.cross(angular[0], offset)
+        normal_speed = wp.dot(relative, n)
+        if depth > 0.0:
+            k = stiffness * spacing[i] * spacing[i]
+            inverse_mass = 1.0 / mass[i] + 1.0 / sphere_mass
+            damping = 2.0 * damping_ratio * wp.sqrt(k / inverse_mass)
+            coefficient = damping + dt * k
+            normal_impulse = wp.max(dt * (k * depth - coefficient * normal_speed), 0.0)
+            normal_impulse /= 1.0 + dt * coefficient * inverse_mass
+            tangent = relative - normal_speed * n
+            friction = wp.min(0.3 * normal_impulse, mass[i] * wp.length(tangent))
+            change = normal_impulse * n - friction * tangent / wp.max(wp.length(tangent), 1.0e-9)
+            impulse[i] = change
+            wp.atomic_add(reaction, 0, -change)
+            wp.atomic_add(moment, 0, wp.cross(offset, -change))
+            wp.atomic_add(work, 0, wp.dot(relative, change))
+            wp.atomic_add(work, 1, 0.5 * wp.length_sq(change) / mass[i])
+
+
+@wp.kernel
+def compliant_contact_energy(
+    q: wp.array[wp.vec3],
+    mass: wp.array[float],
+    spacing: wp.array[float],
+    center: wp.array[wp.vec3],
+    velocity: wp.array[wp.vec3],
+    radius: float,
+    sphere_mass: float,
+    dt: float,
+    stiffness: float,
+    v: wp.array[wp.vec3],
+    impulse: wp.array[wp.vec3],
+    reaction: wp.array[wp.vec3],
+    energy: wp.array[float],
+):
+    """Quadratic bound on spring-energy change under a common impulse scale."""
+    i = wp.tid()
+    offset = q[i] - center[0]
+    distance = wp.length(offset)
+    depth = radius + 0.5 * spacing[i] - distance
+    if depth > 0.0 and distance > 1.0e-8:
+        n = offset / distance
+        k = stiffness * spacing[i] * spacing[i]
+        predicted = depth - dt * wp.dot(v[i] - velocity[0], n)
+        change = dt * wp.dot(impulse[i] / mass[i] - reaction[0] / sphere_mass, n)
+        # The spring is unilateral. Bound its positive compression over
+        # scales in [0, 1], without counting fictitious tensile spring energy
+        # when an opening contact leaves the surface during this substep.
+        if predicted <= 0.0:
+            predicted = 0.0
+            change = wp.min(change, 0.0)
+        else:
+            change = wp.min(change, predicted)
+        wp.atomic_add(energy, 0, 0.5 * k * (predicted * predicted - depth * depth))
+        wp.atomic_add(energy, 1, -k * predicted * change)
+        wp.atomic_add(energy, 2, 0.5 * k * change * change)
+
+
+@wp.kernel
+def compliant_contact_scale(
+    reaction: wp.array[wp.vec3],
+    moment: wp.array[wp.vec3],
+    work: wp.array[float],
+    spring: wp.array[float],
+    sphere_mass: float,
+    radius: float,
+    scale: wp.array[float],
+    failures: wp.array[int],
+):
+    quadratic = work[1] + 0.5 * wp.length_sq(reaction[0]) / sphere_mass
+    quadratic += 0.5 * wp.length_sq(moment[0]) / (0.4 * sphere_mass * radius * radius) + spring[2]
+    linear = work[0] + spring[1]
+    alpha = float(1.0)
+    if spring[0] + linear + quadratic > 1.0e-8:
+        alpha = wp.clamp(-linear / wp.max(2.0 * quadratic, 1.0e-30), 0.0, 1.0)
+        if spring[0] + alpha * linear + alpha * alpha * quadratic > 1.0e-8:
+            wp.atomic_add(failures, 0, 1)
+    scale[0] = alpha
+    reaction[0] *= alpha
+    moment[0] *= alpha
+
+
+@wp.kernel
 def sphere_contact_scale(
     reaction: wp.array[wp.vec3],
     moment: wp.array[wp.vec3],
     work: wp.array[float],
     sphere_mass: float,
     radius: float,
+    restitution: float,
     scale: wp.array[float],
 ):
     """Account for the shared rigid body's simultaneous linear/angular response.
 
-    Contact kinetic work is a*A + a*a*B. Its minimum over [0, 1]
-    is nonpositive because proposed impulses oppose relative motion (A <= 0).
+    Contact kinetic work is a*A + a*a*B. Restitution in [0, 1] scales
+    the dissipative minimum by at most two, keeping the work nonpositive.
     """
     quadratic = work[1] + 0.5 * wp.length_sq(reaction[0]) / sphere_mass
     quadratic += 0.5 * wp.length_sq(moment[0]) / (0.4 * sphere_mass * radius * radius)
     alpha = float(0.0)
     if quadratic > 0.0:
-        alpha = wp.clamp(-work[0] / (2.0 * quadratic), 0.0, 1.0)
+        alpha = (1.0 + restitution) * wp.clamp(-work[0] / (2.0 * quadratic), 0.0, 1.0)
     scale[0] = alpha
     reaction[0] *= alpha
     moment[0] *= alpha
@@ -305,10 +461,29 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         grain_threshold: int = 6
         compression_pressure: float = 1500.0
         compression_hardening: float = 10000.0
+        coupling_fracture: bool = False
+        """Assign fracture fields on the GPU every coupling step, including CUDA graph replay."""
+        field_separation_damage: float = 0.9999
+        """Separate fields during cohesive softening; the remaining bond traction still acts across fields."""
+        contact_restitution: float = 0.0
+        """Fractional rebound in the aggregate particle/sphere contact update, bounded to [0, 1]."""
+        contact_stiffness: float = 0.0
+        """Contact spring stiffness per represented area [N/m^3]; zero uses velocity contact."""
+        contact_damping_ratio: float = 0.75
 
     def __init__(self, model, config):
         if config.fields == 0:
             config.fields = model.particle_count
+        if config.coupling_fracture and config.fields < model.particle_count:
+            raise ValueError("GPU fracture assignment requires one field slot per particle")
+        if not 0.0 < config.field_separation_damage <= 1.0:
+            raise ValueError("Field separation damage must be in (0, 1]")
+        if not 0.0 <= config.contact_restitution <= 1.0:
+            raise ValueError("Contact restitution must be in [0, 1]")
+        if config.contact_stiffness < 0.0 or config.contact_damping_ratio < 0.0:
+            raise ValueError("Require nonnegative contact stiffness and damping")
+        if config.contact_stiffness > 0.0 and config.contact_restitution != 0.0:
+            raise ValueError("Compliant contact uses spring damping instead of contact restitution")
         if not 0.0 < config.bond_peak < config.bond_final or config.bond_strength <= 0.0:
             raise ValueError("Require positive cohesive strength and 0 < peak < final separation")
         if config.neighbor_count < 1 or config.grain_threshold < 0:
@@ -343,6 +518,8 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         self.contact_impulse = wp.zeros(model.particle_count, dtype=wp.vec3, device=model.device)
         self.contact_work = wp.zeros(2, dtype=float, device=model.device)
         self.contact_scale = wp.zeros(1, dtype=float, device=model.device)
+        self.contact_spring_work = wp.zeros(3, dtype=float, device=model.device)
+        self.contact_energy_failures = wp.zeros(1, dtype=int, device=model.device)
         for name in ("center", "velocity", "angular", "local_impulse", "local_moment", "impulse", "moment"):
             setattr(self, name, wp.zeros(1, dtype=wp.vec3, device=model.device))
         # Match the authored shear yield approximately; explicit and implicit laws differ.
@@ -351,12 +528,19 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         )
         self.initial_volume = wp.clone(self.volume)
         self.plastic_log_volume = wp.zeros(model.particle_count, dtype=float, device=model.device)
+        self.component_parent = wp.zeros(model.particle_count, dtype=int, device=model.device)
+        self.component_counts = wp.zeros(model.particle_count, dtype=int, device=model.device)
         self.fragment_count = 1
         self.field_count = 1
         self.update_fields()
 
     def update_fields(self):
-        alive = self.bond_damage.numpy() < 0.9999
+        if self.config.coupling_fracture:
+            # GPU stepping owns the labels; the task only reads diagnostics.
+            self.fragment_count = len(np.unique(self.tissue_field.numpy()))
+            self.field_count = self.fragment_count
+            return
+        alive = self.bond_damage.numpy() < self.config.field_separation_damage
         pairs = self.pairs_host[alive]
         count, labels = connected_components(
             coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(self.model.particle_count,) * 2),
@@ -375,23 +559,64 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         self.fragment_count = count
         self.field_count = count
 
+    def _update_fields_gpu(self):
+        device = self.model.device
+        count = self.model.particle_count
+        wp.launch(initialize_components, count, inputs=[self.component_parent, self.component_counts], device=device)
+        wp.launch(
+            join_components,
+            len(self.bonds),
+            inputs=[self.bonds, self.bond_damage, self.config.field_separation_damage, self.component_parent],
+            device=device,
+        )
+        wp.launch(
+            label_components,
+            count,
+            inputs=[self.component_parent, self.tissue_field, self.component_counts],
+            device=device,
+        )
+        wp.launch(
+            component_sizes,
+            count,
+            inputs=[self.tissue_field, self.component_counts, self.fragment_sizes],
+            device=device,
+        )
+        wp.launch(
+            relax_grains,
+            count,
+            inputs=[self.fragment_sizes, self.config.grain_threshold, self.elastic, self.c],
+            device=device,
+        )
+
+    def check(self):
+        super().check()
+        if self.config.contact_stiffness > 0.0 and self.contact_energy_failures.numpy()[0]:
+            raise RuntimeError(
+                "Compliant contact exceeded its active spring energy bound; reduce stiffness or timestep"
+            )
+
     def reset(self, state, world_mask=None, flags=None):
         if not self._resets_particle_history(world_mask, flags):
             return
         super().reset(state, world_mask, flags)
         self.bond_history.zero_()
+        self.contact_energy_failures.zero_()
         self.bond_damage.zero_()
         self.frames.assign(np.broadcast_to(np.eye(3, dtype=np.float32), (self.model.particle_count, 3, 3)).copy())
         wp.copy(self.skin_frames, self.frames)
         self.plastic_log_volume.zero_()
         wp.copy(self.volume, self.initial_volume)
         self.spacing.assign(np.cbrt(self.initial_volume.numpy()).astype(np.float32))
+        if self.config.coupling_fracture:
+            self._update_fields_gpu()
         self.update_fields()
 
     def step(self, state_in, state_out, control, contacts, dt):
         if state_in is not state_out:
             raise ValueError("Cake fracture currently requires in-place stepping")
         cfg = self.config
+        if cfg.coupling_fracture:
+            self._update_fields_gpu()
         count = round(dt * cfg.substep_rate)
         h = dt / count
         self.impulse.zero_()
@@ -432,33 +657,84 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
             self.local_impulse.zero_()
             self.local_moment.zero_()
             self.contact_work.zero_()
-            wp.launch(
-                sphere_contact,
-                dim=self.model.particle_count,
-                inputs=[
-                    state_in.particle_q,
-                    self.model.particle_mass,
-                    self.spacing,
-                    self.center,
-                    self.velocity,
-                    self.angular,
-                    cfg.cherry_radius,
-                    cfg.cherry_mass,
+            inputs = [
+                state_in.particle_q,
+                self.model.particle_mass,
+                self.spacing,
+                self.center,
+                self.velocity,
+                self.angular,
+                cfg.cherry_radius,
+                cfg.cherry_mass,
+            ]
+            if cfg.contact_stiffness > 0.0:
+                inputs.extend([h, cfg.contact_stiffness, cfg.contact_damping_ratio])
+            inputs.extend(
+                [
                     state_in.particle_qd,
                     self.contact_impulse,
                     self.local_impulse,
                     self.local_moment,
                     self.contact_work,
-                ],
-                device=self.model.device,
+                ]
             )
             wp.launch(
-                sphere_contact_scale,
-                dim=1,
-                inputs=[self.local_impulse, self.local_moment, self.contact_work, cfg.cherry_mass, cfg.cherry_radius],
-                outputs=[self.contact_scale],
+                sphere_compliant_contact if cfg.contact_stiffness > 0.0 else sphere_contact,
+                self.model.particle_count,
+                inputs=inputs,
                 device=self.model.device,
             )
+            if cfg.contact_stiffness > 0.0:
+                self.contact_spring_work.zero_()
+                wp.launch(
+                    compliant_contact_energy,
+                    self.model.particle_count,
+                    inputs=[
+                        state_in.particle_q,
+                        self.model.particle_mass,
+                        self.spacing,
+                        self.center,
+                        self.velocity,
+                        cfg.cherry_radius,
+                        cfg.cherry_mass,
+                        h,
+                        cfg.contact_stiffness,
+                        state_in.particle_qd,
+                        self.contact_impulse,
+                        self.local_impulse,
+                        self.contact_spring_work,
+                    ],
+                    device=self.model.device,
+                )
+                wp.launch(
+                    compliant_contact_scale,
+                    1,
+                    inputs=[
+                        self.local_impulse,
+                        self.local_moment,
+                        self.contact_work,
+                        self.contact_spring_work,
+                        cfg.cherry_mass,
+                        cfg.cherry_radius,
+                    ],
+                    outputs=[self.contact_scale, self.contact_energy_failures],
+                    device=self.model.device,
+                )
+            else:
+                wp.launch(
+                    sphere_contact_scale,
+                    1,
+                    inputs=[
+                        self.local_impulse,
+                        self.local_moment,
+                        self.contact_work,
+                        cfg.cherry_mass,
+                        cfg.cherry_radius,
+                        cfg.contact_restitution,
+                    ],
+                    outputs=[self.contact_scale],
+                    device=self.model.device,
+                )
             wp.launch(
                 apply_sphere_contact,
                 dim=self.model.particle_count,
