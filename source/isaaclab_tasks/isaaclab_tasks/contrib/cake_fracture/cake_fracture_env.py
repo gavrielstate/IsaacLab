@@ -61,6 +61,10 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
     compression_hardening: float = 5000.0
     gaussian_skinning_jacobian: bool = False
     """Include spatial weight derivatives in Gaussian covariance transport; physics is unchanged."""
+    gaussian_paste_flow: bool = False
+    """Skin yielding paste with volume-preserving flow frames and local shared-field supports."""
+    gaussian_paste_strain_limit: float = 0.9
+    """Maximum norm of deviatoric log stretch for paste display; physics is unchanged."""
     gaussian_max_stretch: float = 3.0
     """Maximum singular value of the corrected Gaussian skinning derivative, relative to rest."""
     hybrid_paste_rendering: bool = False
@@ -76,6 +80,8 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
         super().__post_init__()
         if not math.isfinite(self.gaussian_max_stretch) or self.gaussian_max_stretch < 1.0:
             raise ValueError("gaussian_max_stretch must be finite and at least 1")
+        if not math.isfinite(self.gaussian_paste_strain_limit) or self.gaussian_paste_strain_limit <= 0.0:
+            raise ValueError("gaussian_paste_strain_limit must be finite and positive")
         viz = self.sim.default_visualizer_cfg
         viz.eye = (0.52, -0.68, 0.58)
         viz.lookat = (0.0, 0.0, 0.31)

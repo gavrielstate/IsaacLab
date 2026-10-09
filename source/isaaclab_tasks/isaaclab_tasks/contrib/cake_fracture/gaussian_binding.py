@@ -14,6 +14,30 @@ from ..cake_smash.gaussian_stream import CakeGaussianStream
 
 
 @wp.kernel
+def paste_display_frames(
+    native: wp.array[wp.mat33],
+    solid: wp.array[wp.mat33],
+    paste: wp.array[int],
+    volume: wp.array[float],
+    rest_volume: wp.array[float],
+    strain_limit: float,
+    output: wp.array[wp.mat33],
+):
+    """Retain bounded flow distortion and physical volume for yielding paste."""
+    i = wp.tid()
+    f = solid[i]
+    if paste[i] >= 0:
+        u, s, v = wp.svd3(native[i])
+        logs = wp.vec3(wp.log(wp.max(s[0], 1.0e-6)), wp.log(wp.max(s[1], 1.0e-6)), wp.log(wp.max(s[2], 1.0e-6)))
+        mean = (logs[0] + logs[1] + logs[2]) / 3.0
+        deviator = logs - wp.vec3(mean)
+        scale = wp.min(1.0, strain_limit / wp.max(wp.length(deviator), 1.0e-6))
+        logs = wp.vec3(wp.log(volume[i] / rest_volume[i]) / 3.0) + scale * deviator
+        f = u @ wp.diag(wp.vec3(wp.exp(logs[0]), wp.exp(logs[1]), wp.exp(logs[2]))) @ wp.transpose(v)
+    output[i] = f
+
+
+@wp.kernel
 def transport_fragments(
     ids: wp.array2d[int],
     weights: wp.array2d[float],
@@ -24,6 +48,7 @@ def transport_fragments(
     labels: wp.array[int],
     paste_fields: wp.array[int],
     skinning_jacobian: int,
+    paste_flow: int,
     max_stretch: float,
     positions: wp.array[wp.vec3],
     frames: wp.array[wp.mat33],
@@ -45,7 +70,7 @@ def transport_fragments(
         if bond >= 0:
             intact = damage[bond] < 0.9999
         same_piece = intact and labels[j] == labels[anchor]
-        if skinning_jacobian != 0 and paste_fields[anchor] >= 0:
+        if (skinning_jacobian != 0 or paste_flow != 0) and paste_fields[anchor] >= 0:
             same_piece = paste_fields[j] == paste_fields[anchor]
         if same_piece and current_distance <= 1.5 * rest_distance + 0.001:
             weight = weights[i, k]
@@ -92,10 +117,11 @@ def transport_fragments(
 
 
 class FragmentBinding(Binding):
-    def __init__(self, asset, rest, regions, solver, skinning_jacobian=False, max_stretch=3.0):
+    def __init__(self, asset, rest, regions, solver, skinning_jacobian=False, max_stretch=3.0, paste_flow=False):
         super().__init__(asset, rest, regions)
         self.skinning_jacobian = int(skinning_jacobian)
         self.max_stretch = max_stretch
+        self.paste_flow = int(paste_flow)
         self.paste_fields = solver.paste_fields
         self.labels = solver.tissue_field
         self.damage = solver.bond_damage
@@ -118,6 +144,7 @@ class FragmentBinding(Binding):
                 self.labels,
                 self.paste_fields,
                 self.skinning_jacobian,
+                self.paste_flow,
                 self.max_stretch,
                 positions,
                 frames,
@@ -131,9 +158,27 @@ class FragmentBinding(Binding):
 class FractureGaussianStream(CakeGaussianStream):
     @property
     def deformation_frames(self):
+        if self.env.cfg.gaussian_paste_flow:
+            wp.launch(
+                paste_display_frames,
+                self.solver.model.particle_count,
+                inputs=[
+                    self.solver.frames,
+                    self.solver.skin_frames,
+                    self.solver.paste_fields,
+                    self.solver.volume,
+                    self.solver.initial_volume,
+                    self.env.cfg.gaussian_paste_strain_limit,
+                    self.paste_frames,
+                ],
+                device=self.solver.model.device,
+            )
+            return self.paste_frames
         return self.solver.skin_frames
 
     def create_binding(self, rest, physical_regions):
+        if self.env.cfg.gaussian_paste_flow:
+            self.paste_frames = wp.empty_like(self.solver.skin_frames)
         return FragmentBinding(
             self.asset,
             rest,
@@ -141,6 +186,7 @@ class FractureGaussianStream(CakeGaussianStream):
             self.solver,
             skinning_jacobian=self.env.cfg.gaussian_skinning_jacobian,
             max_stretch=self.env.cfg.gaussian_max_stretch,
+            paste_flow=self.env.cfg.gaussian_paste_flow,
         )
 
     def advance_frames(self):
