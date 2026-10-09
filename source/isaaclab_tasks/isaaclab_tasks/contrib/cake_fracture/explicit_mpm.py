@@ -932,6 +932,8 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
         """Exponential velocity damping rate [1/s]."""
         contact_block_dim: int = 256
         """CUDA threads per contact block; small active grids can benefit from one node per block."""
+        sparse_field_contact: bool = False
+        """Build conservative contact candidates in parallel, preserving sequential projection order."""
         contact_broadphase: bool = False
         """Reject AABB pairs unable to overlap under their node velocities this substep."""
         field_friction: float = 0.4
@@ -1054,6 +1056,13 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
             self.visited = wp.zeros(nodes, dtype=int)
             self.errors = wp.zeros(3, dtype=int)
             """Counts of inverted particles, particles leaving the grid, and active-node overflows."""
+            self.field_contacts = None
+            if config.sparse_field_contact and fields > 1:
+                from .field_contacts import SparseFieldContacts
+
+                self.field_contacts = SparseFieldContacts(
+                    count, fields, len(self.active), model.device, config.contact_block_dim
+                )
         self._reset_history()
 
     def damage_view(self, start: int, count: int) -> dict[str, wp.array]:
@@ -1255,35 +1264,32 @@ class SolverExplicitMultiFieldMPM(SolverBase, CouplingInterface):
                         self.upper,
                     ],
                 )
-                wp.launch(
-                    grid_update,
-                    dim=len(self.active),
-                    # Small blocks spread independent node contact work across
-                    # more SMs and reduce divergent pair loops on sparse grids.
-                    block_dim=config.contact_block_dim,
-                    inputs=[
-                        self.active,
-                        self.count,
-                        origin,
-                        resolution,
-                        config.grid_spacing,
-                        self.node_field_count,
-                        self.node_field_ids,
-                        h,
-                        self.gravity,
-                        config.damping,
-                        config.field_friction,
-                        config.contact_broadphase,
-                        *vessels,
-                        self.node_mass,
-                        self.node_momentum,
-                        self.mass_gradient,
-                        self.mass_moment,
-                        self.lower,
-                        self.upper,
-                    ],
-                    outputs=[self.node_velocity],
-                )
+                grid_arguments = [
+                    self.active,
+                    self.count,
+                    origin,
+                    resolution,
+                    config.grid_spacing,
+                    self.node_field_count,
+                    self.node_field_ids,
+                    h,
+                    self.gravity,
+                    config.damping,
+                    config.field_friction,
+                    config.contact_broadphase,
+                    *vessels,
+                    self.node_mass,
+                    self.node_momentum,
+                    self.mass_gradient,
+                    self.mass_moment,
+                    self.lower,
+                    self.upper,
+                    self.node_velocity,
+                ]
+                if self.field_contacts is not None:
+                    self.field_contacts.update(grid_arguments)
+                else:
+                    wp.launch(grid_update, len(self.active), inputs=grid_arguments, block_dim=config.contact_block_dim)
                 wp.launch(
                     grid_to_particle,
                     dim=count,

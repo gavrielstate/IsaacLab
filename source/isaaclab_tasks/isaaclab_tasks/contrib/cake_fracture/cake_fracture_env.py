@@ -50,6 +50,8 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
     cherry_contact_stiffness: float = 0.0
     """Finite contact spring stiffness per represented area [N/m^3]; zero uses velocity contact."""
     cherry_contact_damping_ratio: float = 0.75
+    sparse_field_contact: bool = True
+    """Use conservative sparse grid-contact candidates without changing the physical contact model."""
     node_local_fracture: bool = False
     """Allow local crack opening even while intact bonds elsewhere connect the cake."""
     compression_pressure: float = 1500.0
@@ -119,6 +121,7 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
                 field_friction=0.25,
                 contact_block_dim=1,
                 contact_broadphase=self.contact_broadphase,
+                sparse_field_contact=self.sparse_field_contact,
                 # Finite cylindrical pedestal: unlike the diagnostic's infinite shelf,
                 # debris beyond its rim can fall to the floor.
                 vessels=((*tuple(center), 0.0, radius, half_height),),
