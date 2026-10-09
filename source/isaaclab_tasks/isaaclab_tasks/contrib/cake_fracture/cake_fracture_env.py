@@ -22,6 +22,8 @@ from .solver import CakeFractureSolverCfg, SolverCakeFracture
 
 @configclass
 class CakeFractureEnvCfg(CakeSmashEnvCfg):
+    cherry_mass: float = 1.5
+    """Cherry mass [kg]; a lighter impactor leaves more of the cake intact."""
     contact_broadphase: bool = False
     """Reject disjoint swept particle-extent boxes before field contact."""
     bond_graph: str = "nearest"
@@ -31,42 +33,44 @@ class CakeFractureEnvCfg(CakeSmashEnvCfg):
     """Plastic log-volume collapse at onset of sponge cohesive damage."""
     crush_final: float = 0.0
     """Plastic log-volume collapse at complete damage; zero disables."""
-    grain_deformation: float = 0.0
+    grain_deformation: float = 1.0
     """Bounded affine strain for unresolved sponge grains; zero retains rigid grains."""
     grain_threshold: int = 6
-    bond_strength: float = 400.0
-    bond_peak: float = 0.001
-    bond_final: float = 0.004
-    mpm_grid_half_extent: float = 0.52
+    # Increased failure separation retains cohesion through sponge compression.
+    bond_strength: float = 900.0
+    bond_peak: float = 0.0045
+    bond_final: float = 0.014
+    mpm_grid_half_extent: float = 0.91
     """Horizontal grid half extent [m]; enlarge to retain widely scattered debris."""
     fracture_fields: int = 0
     """Zero reserves one slot per particle; contact work uses only active fragments."""
-    coupling_fracture: bool = False
+    coupling_fracture: bool = True
     """Update fragment velocity fields at 120 Hz rather than the 30 Hz task boundary."""
-    field_separation_damage: float = 0.9999
+    field_separation_damage: float = 0.5
     """Damage threshold for separating velocity fields while retaining cohesive bond traction."""
     cherry_contact_restitution: float = 0.0
     """Aggregate particle/cherry rebound, bounded by the incoming contact kinetic energy."""
-    cherry_contact_stiffness: float = 0.0
+    cherry_contact_stiffness: float = 10000000.0
     """Finite contact spring stiffness per represented area [N/m^3]; zero uses velocity contact."""
-    cherry_contact_damping_ratio: float = 0.75
+    cherry_contact_damping_ratio: float = 3.0
     sparse_field_contact: bool = True
     """Use conservative sparse grid-contact candidates without changing the physical contact model."""
-    node_local_fracture: bool = False
+    node_local_fracture: bool = True
     """Allow local crack opening even while intact bonds elsewhere connect the cake."""
-    compression_pressure: float = 1500.0
-    compression_hardening: float = 10000.0
+    compression_pressure: float = 900.0
+    compression_hardening: float = 5000.0
     gaussian_skinning_jacobian: bool = False
     """Include spatial weight derivatives in Gaussian covariance transport; physics is unchanged."""
     gaussian_max_stretch: float = 3.0
     """Maximum singular value of the corrected Gaussian skinning derivative, relative to rest."""
     hybrid_paste_rendering: bool = False
     """Render cream/frosting with Newton particle surfaces and retain sponge Gaussians."""
-    paste_viscosity: float = 0.0
+    paste_viscosity: float = 50.0
     """Fracture-activated cream/frosting plastic-flow viscosity [Pa s]; zero disables."""
     paste_surface_voxel_size: float = 0.003
     paste_surface_threshold: float = 0.15
-    explicit_substep_rate: int = 4800
+    explicit_substep_rate: int = 1200
+    """MPM integration rate [Hz]; increase for greater timestep accuracy."""
 
     def __post_init__(self):
         super().__post_init__()
