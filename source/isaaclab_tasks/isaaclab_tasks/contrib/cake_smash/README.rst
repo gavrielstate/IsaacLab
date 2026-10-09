@@ -8,6 +8,11 @@ MuJoCo Warp and coupled proxy solvers produce the motion. The standard Lab
 ``newton_rtx`` visualizer renders a deforming Gaussian field, stand and cherry.
 There is no task-specific viewer or simulation loop.
 
+The separate ``IsaacContrib-Cake-Fracture-Direct`` task uses the experimental
+explicit multi-field solver derived from the Raspberry example. Select the
+task ID to choose the solver; this native task remains available unchanged.
+See ``../cake_fracture/README.rst`` for fracture-task setup and differences.
+
 Run interactively
 -----------------
 
