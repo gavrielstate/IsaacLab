@@ -48,7 +48,7 @@ class TargetedShotPutEnv(DirectRLEnv):
     def _pre_physics_step(self, actions):
         self.elapsed_steps += 1
         self.previous_actions.copy_(self.actions)
-        self.actions = actions.clamp(-1.0, 1.0)
+        self.actions.copy_(actions.clamp(-1.0, 1.0))
         self.previous_ball.copy_(self.ball.data.root_pos_w.torch)
 
     def _apply_action(self):
@@ -93,14 +93,14 @@ class TargetedShotPutEnv(DirectRLEnv):
         self.release_upward[new_release] = (velocity[new_release, 2] > 0.2) & (self.elapsed_steps[new_release] >= 6)
         self.released |= new_release
         self.flight_time += self.released.float() * self.step_dt
-        self.landed = (p[:, 2] <= self.cfg.ball_radius + 0.005) & (self.elapsed_steps > 2)
+        self.landed.copy_((p[:, 2] <= self.cfg.ball_radius + 0.005) & (self.elapsed_steps > 2))
         # Interpolate the final flight segment, so bouncing/rolling cannot improve accuracy.
         frac = (
             (self.previous_ball[:, 2] - self.cfg.ball_radius) / (self.previous_ball[:, 2] - p[:, 2]).clamp_min(1e-6)
         ).clamp(0.0, 1.0)
         impact = self.previous_ball[:, :2] + frac[:, None] * (p[:, :2] - self.previous_ball[:, :2])
         error = (impact - self.scene.env_origins[:, :2] - self.target).norm(dim=1)
-        self.impact_error = torch.where(self.landed, error, self.impact_error)
+        self.impact_error.copy_(torch.where(self.landed, error, self.impact_error))
         escaped = (p - self.scene.env_origins).norm(dim=1) > 4.0
         return self.landed | escaped, self.elapsed_steps >= self.max_episode_length
 
