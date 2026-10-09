@@ -25,6 +25,15 @@ class G1CakeFractureEnvCfg(G1CakeEnvCfg):
     cake_offset: tuple[float, float, float] = (1.13, 0.01, 0.0)
     cake: CakeFractureEnvCfg = CakeFractureEnvCfg(gaussian_paste_flow=True)
 
+    def __post_init__(self):
+        super().__post_init__()
+        visualizer = self.sim.default_visualizer_cfg
+        visualizer.eye = (1.60, -1.55, 1.10)
+        visualizer.lookat = (0.50, -0.02, 0.65)
+        visualizer.rtx_environment = "studio"
+        visualizer.enable_sky = False
+        visualizer.background_color = (0.12, 0.14, 0.17)
+
 
 class G1CakeFractureEnv(G1CakeEnv):
     """One physical projectile from hand contact through cohesive MPM impact."""

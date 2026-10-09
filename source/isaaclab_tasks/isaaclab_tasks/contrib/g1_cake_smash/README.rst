@@ -74,6 +74,8 @@ are translated with the cake before construction. MPM substeps remain at
 1200 Hz, while rigid coupling follows the recorded 240 Hz robot timestep.
 Control remains at 60 Hz. Reset clears fracture, compaction, paste and
 coupled-solver history before returning the ball to the trained palm pose.
+The initial interactive view frames both robot and cake with studio lighting;
+the camera remains under the standard viewer's orbit/pan/zoom controls.
 
 This task accepts the fixed-base 53-observation / 12-action contract only.
 A free-standing checkpoint with different observations/actions requires its

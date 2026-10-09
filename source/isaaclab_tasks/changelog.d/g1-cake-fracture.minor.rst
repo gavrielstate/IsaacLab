@@ -6,3 +6,5 @@ Added
   rendering while preserving trained robot mechanics and manual reset.
 * Added configurable rigid impactor body selection for the cake fracture
   solver and separate appearance configuration for Gaussian scene streams.
+* Framed the robot and cake together with studio lighting in the fracture
+  task's initial interactive view.
