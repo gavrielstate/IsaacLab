@@ -156,9 +156,13 @@ class FragmentBinding(Binding):
 
 
 class FractureGaussianStream(CakeGaussianStream):
+    def __init__(self, env, asset_path, position_offset=(0.0, 0.0, 0.0), appearance_cfg=None):
+        self.appearance_cfg = env.cfg if appearance_cfg is None else appearance_cfg
+        super().__init__(env, asset_path, position_offset=position_offset)
+
     @property
     def deformation_frames(self):
-        if self.env.cfg.gaussian_paste_flow:
+        if self.appearance_cfg.gaussian_paste_flow:
             wp.launch(
                 paste_display_frames,
                 self.solver.model.particle_count,
@@ -168,7 +172,7 @@ class FractureGaussianStream(CakeGaussianStream):
                     self.solver.paste_fields,
                     self.solver.volume,
                     self.solver.initial_volume,
-                    self.env.cfg.gaussian_paste_strain_limit,
+                    self.appearance_cfg.gaussian_paste_strain_limit,
                     self.paste_frames,
                 ],
                 device=self.solver.model.device,
@@ -177,16 +181,16 @@ class FractureGaussianStream(CakeGaussianStream):
         return self.solver.skin_frames
 
     def create_binding(self, rest, physical_regions):
-        if self.env.cfg.gaussian_paste_flow:
+        if self.appearance_cfg.gaussian_paste_flow:
             self.paste_frames = wp.empty_like(self.solver.skin_frames)
         return FragmentBinding(
             self.asset,
             rest,
             physical_regions,
             self.solver,
-            skinning_jacobian=self.env.cfg.gaussian_skinning_jacobian,
-            max_stretch=self.env.cfg.gaussian_max_stretch,
-            paste_flow=self.env.cfg.gaussian_paste_flow,
+            skinning_jacobian=self.appearance_cfg.gaussian_skinning_jacobian,
+            max_stretch=self.appearance_cfg.gaussian_max_stretch,
+            paste_flow=self.appearance_cfg.gaussian_paste_flow,
         )
 
     def advance_frames(self):

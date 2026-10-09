@@ -45,3 +45,36 @@ and recordings are kept under ``work/cake``, outside candidate repository code.
 The fixed-base task implementation and agent configuration were selected from
 ``experiment/targeted-shot-put`` at ``853400c26a1``; its unrelated baseline and
 dependency changes are not included. Asset data and policy weights are external.
+
+Fracture cake variant
+---------------------
+
+``IsaacContrib-G1-Cake-Fracture-Direct`` keeps the same fixed-base policy and
+trained robot mechanics, with the newer explicit multi-field cake solver.
+The default is a 1.5 kg cherry and a fixed cake offset (1.13, 0.01, 0) m,
+calibrated for that mass and the supplied checkpoint's (1.2, 0) m ground target.
+The original 35 mm collision radius is retained. Fracture, compacting sponge,
+yielding viscous paste and full Gaussian rendering are enabled; no launch
+impulse or release teleport is prescribed. Native MPM remains available in
+``IsaacContrib-G1-Cake-Smash-Direct``.
+
+.. code-block:: bash
+
+   export ISAACLAB_CAKE_PHYSICS_USD_PATH=/path/to/sponge_30k.usdc
+   export ISAACLAB_CAKE_GAUSSIAN_USD_PATH=/path/to/cake_live_ovrtx.usdc
+   export ISAACLAB_SHOT_POLICY_PARAMS_PATH=/path/to/shot_policy/params
+   uv run --no-sync isaaclab play --task IsaacContrib-G1-Cake-Fracture-Direct \
+       --visualizer newton_rtx --num_envs 1 --checkpoint /path/to/shot_policy/model_2999.pt
+
+The physics asset is the validated 936-particle soft-sponge variant, with its
+relative dependencies preserved. Cake material and skinning overrides use
+the nested ``env.cake`` configuration; for example, ``env.cake.paste_viscosity``
+and ``env.cake.gaussian_paste_flow``. The solver grid and analytic pedestal
+are translated with the cake before construction. MPM substeps remain at
+1200 Hz, while rigid coupling follows the recorded 240 Hz robot timestep.
+Control remains at 60 Hz. Reset clears fracture, compaction, paste and
+coupled-solver history before returning the ball to the trained palm pose.
+
+This task accepts the fixed-base 53-observation / 12-action contract only.
+A free-standing checkpoint with different observations/actions requires its
+own matching robot task integration; it must not be loaded into this task.

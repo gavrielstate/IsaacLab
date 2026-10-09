@@ -565,6 +565,8 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         bond_peak: float = 0.002
         bond_final: float = 0.006
         cherry_radius: float = 0.077
+        impactor_body_suffix: str = "/Cherry"
+        """Unique rigid proxy body suffix; robot shot-put scenes use /Ball."""
         cherry_mass: float = 2.0
         neighbor_count: int = 8
         bond_graph: str = "nearest"
@@ -611,7 +613,9 @@ class SolverCakeFracture(SolverExplicitMultiFieldMPM):
         ):
             raise ValueError("Require 0 <= crush start < final, or both zero to disable crush damage")
         super().__init__(model, config)
-        bodies = [i for i, name in enumerate(model.body_label) if name.endswith("/Cherry")]
+        if not config.impactor_body_suffix:
+            raise ValueError("Require a nonempty impactor body suffix")
+        bodies = [i for i, name in enumerate(model.body_label) if name.endswith(config.impactor_body_suffix)]
         if len(bodies) != 1:
             raise ValueError(f"Expected exactly one cherry proxy, got {model.body_label}")
         self.cherry_body = bodies[0]

@@ -15,3 +15,14 @@ gym.register(
             "default_agent": "rsl_rl",
             "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg"},
 )
+
+gym.register(
+    id="IsaacContrib-G1-Cake-Fracture-Direct",
+    entry_point=f"{__name__}.g1_cake_fracture_env:G1CakeFractureEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.g1_cake_fracture_env:G1CakeFractureEnvCfg",
+        "default_agent": "rsl_rl",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg",
+    },
+)

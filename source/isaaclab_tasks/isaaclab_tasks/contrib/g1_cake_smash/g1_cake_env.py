@@ -121,7 +121,7 @@ class G1CakeEnv(TargetedShotPutEnv):
         _restore_policy_mechanics(cfg)
         cfg.mass_range = (cfg.cherry_mass, cfg.cherry_mass)
         cfg.mass_curriculum_initial_steps = cfg.mass_curriculum_steps
-        cake_cfg = CakeSmashEnvCfg(physics_asset_path=cfg.physics_asset_path, cherry_mass=cfg.cherry_mass)
+        cake_cfg = self._create_cake_config(cfg)
         coupled = clone(cake_cfg.sim.physics.solver_cfg)
         coupled.entries[0].solver_cfg = cfg.sim.physics.solver_cfg
         coupled.entries[0].bodies = [r"/World/envs/env_.*/Robot/.*", r"/World/envs/env_.*/Ball"]
@@ -172,8 +172,16 @@ class G1CakeEnv(TargetedShotPutEnv):
             if len(self._gaussian_visualizers) != 1 or cfg.gaussian_asset_path is None:
                 self.close()
                 raise ValueError("G1 Cake requires one RTX visualizer and a cake Gaussian asset.")
-            self.gaussian_stream = CakeGaussianStream(self, cfg.gaussian_asset_path, position_offset=cfg.cake_offset)
+            self.gaussian_stream = self._create_gaussian_stream()
             self._gaussian_visualizers[0].add_scene_stream(self.gaussian_stream)
+
+    def _create_cake_config(self, cfg):
+        """Select cake physics before constructing the coupled robot scene."""
+        return CakeSmashEnvCfg(physics_asset_path=cfg.physics_asset_path, cherry_mass=cfg.cherry_mass)
+
+    def _create_gaussian_stream(self):
+        """Bind the native material frames to the translated Gaussian asset."""
+        return CakeGaussianStream(self, self.cfg.gaussian_asset_path, position_offset=self.cfg.cake_offset)
 
     @property
     def particle_positions(self) -> wp.array:
@@ -193,13 +201,17 @@ class G1CakeEnv(TargetedShotPutEnv):
     def _reset_idx(self, env_ids):
         for viz in self._gaussian_visualizers:
             viz.finish_frame()
-        NewtonMPMManager.reset_solver_state(world_mask=None)
+        self._reset_solver()
         super()._reset_idx(env_ids)
         self.target[env_ids] = torch.tensor(self.cfg.ground_target, device=self.device)
         if self.gaussian_stream is not None:
             self.gaussian_stream.invalidate()
         for viz in self._gaussian_visualizers:
             viz.reset_render_history()
+
+    def _reset_solver(self):
+        """Restore material history before placing the trained shot in the palm."""
+        NewtonMPMManager.reset_solver_state(world_mask=None)
 
     def close(self):
         try:
